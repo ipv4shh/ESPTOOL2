@@ -19,7 +19,11 @@ struct_message myData;
 esp_now_peer_info_t peerInfo;
 
 // ===== КОЛБЭК ESP-NOW =====
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+void OnDataSent(const esp_now_send_info_t *info, esp_now_send_status_t status) {
+#else
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+#endif
   Serial.print("ESP-NOW статус: ");
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "✅ Успешно" : "❌ Ошибка");
 }
