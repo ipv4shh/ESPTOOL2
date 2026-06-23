@@ -1,0 +1,10 @@
+# Arduino IDE / CLI / Visual Studio Code
+*.local.properties
+/build/
+/libraries/
+.vscode/
+
+# OS Metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

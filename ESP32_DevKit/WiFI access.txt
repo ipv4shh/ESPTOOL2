@@ -1,0 +1,2 @@
+Name WiFi - ESP Admin
+Password - Esp_div_admin
