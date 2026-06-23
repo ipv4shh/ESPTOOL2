@@ -1,6 +1,11 @@
- ESPTOOL2 — Multi-band Wireless Toolkit
+ # ESPTOOL2 — Multi-band Wireless Toolkit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
+[![GitHub stars](https://img.shields.io/github/stars/ipv4shh/ESPTOOL2?style=flat-square)](https://github.com/ipv4shh/ESPTOOL2/stargazers)
+[![Platform](https://img.shields.io/badge/platform-ESP32%20%7C%20ESP32--S3-blue?style=flat-square)](https://github.com/ipv4shh/ESPTOOL2)
+
+![ESPTOOL2 Web Interface](esptool2_ui_mockup.jpg)
+
 
 > [!IMPORTANT]
 > **Для новичков:** Специально для тех, кто впервые работает с платами ESP32, написана подробная [пошаговая инструкция для чайников](INSTRUCTIONS.md). Рекомендуется начать с неё!
