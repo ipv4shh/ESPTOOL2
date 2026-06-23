@@ -223,6 +223,7 @@ void startIRReplay() { Serial.println("⚠️ IR Replay требует IR-дио
 void restoreWiFiState() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  WiFi.setSleep(false);
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
@@ -307,6 +308,7 @@ void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  WiFi.setSleep(false); // Отключаем спящий режим для надежной работы ESP-NOW
 
   // Принудительно настраиваем Wi-Fi на канал 1 для стабильного приема ESP-NOW
   esp_wifi_set_promiscuous(true);

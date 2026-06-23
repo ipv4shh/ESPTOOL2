@@ -250,6 +250,7 @@ void setup() {
   // Инициализация Wi-Fi AP на канале 1
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password, 1);
+  WiFi.setSleep(false); // Отключаем спящий режим для надежности
   Serial.print("IP: ");
   Serial.println(WiFi.softAPIP());
 
@@ -264,6 +265,7 @@ void setup() {
   memcpy(peerInfo.peer_addr, slaveMac, 6);
   peerInfo.channel = 1; // Указываем канал 1
   peerInfo.encrypt = false;
+  peerInfo.ifidx = WIFI_IF_AP; // Явно указываем AP-интерфейс для отправки с Master
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
     Serial.println("Ошибка добавления SLAVE");
     return;
