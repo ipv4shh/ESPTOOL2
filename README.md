@@ -4,7 +4,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/ipv4shh/ESPTOOL2?style=flat-square)](https://github.com/ipv4shh/ESPTOOL2/stargazers)
 [![Platform](https://img.shields.io/badge/platform-ESP32%20%7C%20ESP32--S3-blue?style=flat-square)](https://github.com/ipv4shh/ESPTOOL2)
 
-![ESPTOOL2 Web Interface](esptool2_ui_mockup.jpg)
+![ESPTOOL2 Banner](esptool2_banner.jpg)
 
 
 > [!IMPORTANT]
