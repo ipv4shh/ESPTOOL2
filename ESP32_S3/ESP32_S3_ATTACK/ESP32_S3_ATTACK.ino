@@ -221,7 +221,7 @@ void startIRReplay() { Serial.println("⚠️ IR Replay требует IR-дио
 
 // ===== ВОССТАНОВЛЕНИЕ СОСТОЯНИЯ WI-FI =====
 void restoreWiFiState() {
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
@@ -305,7 +305,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
   // Принудительно настраиваем Wi-Fi на канал 1 для стабильного приема ESP-NOW
