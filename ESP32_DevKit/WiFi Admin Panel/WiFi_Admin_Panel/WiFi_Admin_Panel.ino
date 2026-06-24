@@ -1,6 +1,9 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_now.h>
+#if __has_include(<esp_arduino_version.h>)
+#include <esp_arduino_version.h>
+#endif
 
 // ===== НАСТРОЙКИ =====
 const char* ap_ssid = "ESP-Admin";
@@ -24,10 +27,10 @@ typedef struct struct_message {
 struct_message myData;
 esp_now_peer_info_t peerInfo;
 
-void addLog(const char* logMsg) {
+void addLog(const String& logMsg) {
   // Добавляем лог в хронологическом порядке (новые снизу)
   String timeStr = "[" + String(millis() / 1000) + "s] ";
-  attackLogs = attackLogs + timeStr + String(logMsg) + "\n";
+  attackLogs = attackLogs + timeStr + logMsg + "\n";
   // Ограничиваем размер буфера (последние ~2000 символов)
   if (attackLogs.length() > 2000) {
     attackLogs = attackLogs.substring(attackLogs.length() - 2000);
@@ -869,7 +872,7 @@ void setup() {
     String response = "Команда: " + cmd + " | Атака: " + attack;
     if (cmd == "start") {
       response = "▶️ Атака " + attack + " запущена!";
-      addLog(("Запуск атаки: " + attack).c_str());
+      addLog("Запуск атаки: " + attack);
     }
     else if (cmd == "stop") {
       response = "⏹️ Атака " + attack + " остановлена!";

@@ -1,6 +1,9 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#if __has_include(<esp_arduino_version.h>)
+#include <esp_arduino_version.h>
+#endif
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
