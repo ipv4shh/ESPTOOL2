@@ -572,6 +572,7 @@ String webpage = R"rawliteral(
   let wifiNetworks = [];
   let bleDevices = [];
   let evilTwinClients = [];
+  let isClearing = false;
 
   function parseLogs(text) {
     const lines = text.split('\n');
@@ -712,9 +713,11 @@ String webpage = R"rawliteral(
   }
 
   function updateConsole() {
+    if (isClearing) return;
     fetch('/logs')
       .then(r => r.text())
       .then(data => {
+        if (isClearing) return;
         parseLogs(data);
         
         const filteredLogs = data.split('\n')
@@ -728,17 +731,30 @@ String webpage = R"rawliteral(
           consoleBox.innerHTML = filteredLogs;
           consoleBox.scrollTop = consoleBox.scrollHeight;
         }
+      })
+      .catch(err => {
+        console.error("Ошибка обновления консоли логов:", err);
       });
   }
 
   function clearLogs() {
+    isClearing = true;
+    document.getElementById('console-box').innerHTML = 'Очистка логов на сервере...';
+    wifiNetworks = [];
+    bleDevices = [];
+    evilTwinClients = [];
+    updateDashboardUI();
+    
     fetch('/clear_logs')
+      .then(r => r.text())
       .then(() => {
         document.getElementById('console-box').innerHTML = 'Лог консоли очищен.';
-        wifiNetworks = [];
-        bleDevices = [];
-        evilTwinClients = [];
-        updateDashboardUI();
+        setTimeout(() => { isClearing = false; }, 600);
+      })
+      .catch(err => {
+        document.getElementById('console-box').innerHTML = '❌ Ошибка связи с сервером при очистке.';
+        console.error(err);
+        isClearing = false;
       });
   }
 
