@@ -1,4 +1,4 @@
-﻿#include <WiFi.h>
+#include <WiFi.h>
 #include <WebServer.h>
 #include <esp_now.h>
 #include "webpage.h"
