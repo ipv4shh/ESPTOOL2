@@ -1,3 +1,11 @@
+```text
+ _____ ____  ____ _____ ___   ___  _     ____  
+| ____/ ___||  _ \_   _/ _ \ / _ \| |   |___ \ 
+|  _| \___ \| |_) || || | | | | | | |     __) |
+| |___ ___) |  __/ | || |_| | |_| | |___ / __/ 
+|_____|____/|_|    |_| \___/ \___/|_____|_____|
+```
+
  # ESPTOOL2 — Multi-band Wireless Toolkit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
