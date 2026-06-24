@@ -833,11 +833,17 @@ void setup() {
   });
 
   server.on("/logs", []() {
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
     server.send(200, "text/plain", attackLogs);
   });
 
   server.on("/clear_logs", []() {
     attackLogs = "";
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
     server.send(200, "text/plain", "Cleared");
   });
 
@@ -854,6 +860,9 @@ void setup() {
               slaveMac[0], slaveMac[1], slaveMac[2], slaveMac[3], slaveMac[4], slaveMac[5]);
       statusStr += macStr;
     }
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
     server.send(200, "text/plain", statusStr);
   });
 
@@ -879,6 +888,10 @@ void setup() {
       addLog("Команда STOP отправлена на Slave");
     }
     else if (cmd == "ping") response = "Отправлен PING!";
+    
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
     server.send(200, "text/plain", response);
   });
 
