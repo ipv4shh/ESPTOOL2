@@ -7,72 +7,60 @@ const String webpage = R"rawliteral(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESPTOOL2 | Консоль управления</title>
+  <title>ESPTOOL2 | CONTROL CONSOLE</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --primary-gradient: linear-gradient(135deg, #ff4122 0%, #ee3a17 100%);
-      --accent-glow: rgba(238, 58, 23, 0.45);
-      --bg-gradient: linear-gradient(135deg, #0a0b0d 0%, #050507 100%);
-      --panel-bg: rgba(18, 20, 26, 0.75);
-      --border-color: rgba(255, 255, 255, 0.06);
-      --text-main: #f4f4f5;
-      --text-muted: #8e8e96;
+      --primary-color: #ff4122;
+      --bg-color: #050508;
+      --panel-bg: #09090b;
+      --border-color: #27272a;
+      --text-main: #e4e4e7;
+      --text-muted: #71717a;
+      --green-status: #10b981;
+      --red-status: #ef4444;
+      --amber-status: #f59e0b;
     }
-    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'JetBrains Mono', monospace; }
     body {
-      background: var(--bg-gradient);
+      background: var(--bg-color);
       color: var(--text-main);
       display: flex;
       justify-content: center;
       align-items: center;
       min-height: 100vh;
       padding: 16px;
-      overflow-x: hidden;
     }
     .container {
       background: var(--panel-bg);
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
-      padding: 32px 28px;
-      border-radius: 20px;
+      padding: 20px;
+      border-radius: 4px;
       max-width: 650px;
       width: 100%;
       border: 1px solid var(--border-color);
-      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-      position: relative;
-      transition: all 0.3s ease;
-    }
-    .container::before {
-      content: '';
-      position: absolute;
-      top: -2px; left: -2px; right: -2px; bottom: -2px;
-      background: linear-gradient(135deg, rgba(238,58,23,0.1), rgba(255,255,255,0.01), rgba(238,58,23,0.05));
-      border-radius: 22px;
-      z-index: -1;
-      pointer-events: none;
-    }
-    h1 {
       text-align: center;
-      font-size: 28px;
-      font-weight: 800;
-      letter-spacing: -0.5px;
-      margin-bottom: 4px;
     }
-    h1 span {
-      background: var(--primary-gradient);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      filter: drop-shadow(0 2px 8px rgba(238, 58, 23, 0.3));
+    .ascii-art {
+      font-size: 8px;
+      line-height: 1.1;
+      color: var(--primary-color);
+      text-align: center;
+      margin-bottom: 16px;
+      white-space: pre;
+      display: block;
+      overflow-x: auto;
+    }
+    @media (min-width: 480px) {
+      .ascii-art {
+        font-size: 10px;
+      }
     }
     .sub {
-      text-align: center;
       color: var(--text-muted);
-      font-size: 13px;
-      margin-bottom: 28px;
-      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      margin-bottom: 16px;
       letter-spacing: 1px;
       text-transform: uppercase;
     }
@@ -80,436 +68,383 @@ const String webpage = R"rawliteral(
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      padding: 10px 18px;
-      border-radius: 12px;
-      margin-bottom: 24px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+      background: #020203;
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-size: 11px;
     }
     .status-info {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      padding: 10px 18px;
-      border-radius: 12px;
-      margin-bottom: 24px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
-    }
-    .status-info {
-      display: flex;
-      align-items: center;
-      gap: 10px;
+      gap: 8px;
     }
     .status-dot {
-      width: 8px;
-      height: 8px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
       display: inline-block;
-      transition: all 0.3s ease;
     }
-    .status-dot.offline { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
-    .status-dot.online { background: #10b981; box-shadow: 0 0 10px #10b981; }
-    .status-dot.testing { background: #f59e0b; box-shadow: 0 0 10px #f59e0b; animation: pulse 1s infinite alternate; }
-    
-    @keyframes pulse {
-      0% { transform: scale(1); opacity: 0.6; }
-      100% { transform: scale(1.3); opacity: 1; }
-    }
+    .status-dot.offline { background: var(--red-status); }
+    .status-dot.online { background: var(--green-status); }
+    .status-dot.testing { background: var(--amber-status); }
 
-    .btn-check {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+    .btn-check, .btn-clear {
+      background: transparent;
+      border: 1px solid var(--border-color);
       color: var(--text-main);
-      padding: 6px 12px;
-      border-radius: 8px;
+      padding: 4px 10px;
+      border-radius: 2px;
       cursor: pointer;
       font-size: 11px;
-      font-weight: 600;
-      transition: all 0.2s ease;
-      font-family: 'JetBrains Mono', monospace;
     }
-    .btn-check:hover {
-      background: rgba(255, 255, 255, 0.1);
-      border-color: rgba(255, 255, 255, 0.15);
-    }
-    .btn-check:active {
-      transform: scale(0.97);
+    .btn-check:hover, .btn-clear:hover {
+      border-color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.01);
     }
 
     .tabs {
       display: flex;
-      gap: 6px;
-      margin-bottom: 20px;
-      background: rgba(0, 0, 0, 0.2);
-      padding: 4px;
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.02);
+      gap: 4px;
+      margin-bottom: 12px;
+      background: #020203;
+      padding: 2px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      overflow-x: auto;
     }
     .tab {
       flex: 1;
-      padding: 10px;
-      border-radius: 8px;
+      padding: 6px;
+      border-radius: 2px;
       border: none;
       background: transparent;
       color: var(--text-muted);
+      font-size: 11px;
       font-weight: 600;
-      font-size: 13px;
       cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-      font-family: 'JetBrains Mono', monospace;
       text-align: center;
+      white-space: nowrap;
     }
     .tab:hover {
       color: var(--text-main);
-      background: rgba(255, 255, 255, 0.02);
     }
     .tab.active {
-      background: rgba(238, 58, 23, 0.08);
-      color: #ff5235;
-      border: 1px solid rgba(238, 58, 23, 0.25);
-      box-shadow: 0 4px 12px rgba(238, 58, 23, 0.05);
+      background: rgba(255, 65, 34, 0.08);
+      color: var(--primary-color);
+      border: 1px solid rgba(255, 65, 34, 0.15);
     }
     .tab-content { display: none; }
     .tab-content.active {
       display: block;
-      animation: fadeIn 0.4s ease;
-    }
-    
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(6px); }
-      to { opacity: 1; transform: translateY(0); }
     }
 
     .grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 24px;
+      gap: 6px;
+      margin-bottom: 16px;
     }
     .attack-btn {
-      padding: 16px 12px;
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      background: rgba(255, 255, 255, 0.01);
+      padding: 10px;
+      border-radius: 2px;
+      border: 1px solid var(--border-color);
+      background: transparent;
       color: var(--text-main);
       cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
       text-align: center;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 6px;
     }
     .attack-btn:hover {
-      border-color: rgba(238, 58, 23, 0.3);
-      background: rgba(238, 58, 23, 0.03);
-      transform: translateY(-2px);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+      border-color: var(--primary-color);
     }
     .attack-btn.selected {
-      border-color: #ee3a17;
-      background: rgba(238, 58, 23, 0.08);
-      box-shadow: 0 0 15px rgba(238, 58, 23, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-    }
-    .attack-btn .icon {
-      font-size: 24px;
-      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+      border-color: var(--primary-color);
+      background: rgba(255, 65, 34, 0.05);
     }
     .attack-btn .label {
-      font-size: 13px;
+      font-size: 11px;
       font-weight: 600;
-      font-family: 'JetBrains Mono', monospace;
     }
     .action-row {
       display: flex;
-      gap: 12px;
-      margin-bottom: 20px;
+      gap: 6px;
+      margin-bottom: 12px;
     }
     .action-row button {
       flex: 1;
-      padding: 16px;
-      border: none;
-      border-radius: 12px;
-      font-size: 15px;
+      padding: 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-size: 11px;
       font-weight: 700;
       cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-      font-family: 'JetBrains Mono', monospace;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      gap: 8px;
+      background: transparent;
+      color: var(--text-main);
     }
     .btn-start {
-      background: var(--primary-gradient);
-      color: #fff;
-      box-shadow: 0 8px 24px -6px var(--accent-glow);
+      border-color: var(--primary-color) !important;
+      color: var(--primary-color) !important;
     }
     .btn-start:hover {
-      background: linear-gradient(135deg, #ff5235 0%, #f04726 100%);
-      transform: translateY(-2px);
-      box-shadow: 0 12px 28px -4px var(--accent-glow);
-    }
-    .btn-start:active {
-      transform: translateY(0);
-    }
-    .btn-stop {
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--text-main);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 65, 34, 0.05);
     }
     .btn-stop:hover {
-      background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.1);
+      border-color: var(--text-muted);
     }
     .status {
       text-align: center;
-      padding: 16px;
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.02);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 13px;
+      padding: 10px;
+      background: #020203;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      font-size: 11px;
       color: var(--text-muted);
-      min-height: 52px;
+      min-height: 36px;
       display: flex;
       justify-content: center;
       align-items: center;
-      box-shadow: inset 0 2px 8px rgba(0,0,0,0.3);
+      margin-bottom: 12px;
     }
     .console-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin: 20px 0 8px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 11px;
+      margin: 12px 0 6px;
+      font-size: 10px;
       color: var(--text-muted);
     }
     .console-box {
-      background: #040405;
-      border: 1px solid rgba(255,255,255,0.03);
-      border-radius: 12px;
-      padding: 16px;
-      font-family: 'JetBrains Mono', monospace;
+      background: #020203;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 10px;
       font-size: 11px;
-      line-height: 1.6;
+      line-height: 1.4;
       color: #34d399;
-      height: 160px;
+      height: 120px;
       overflow-y: auto;
       white-space: pre-wrap;
-      box-shadow: inset 0 4px 12px rgba(0,0,0,0.6);
       text-align: left;
-    }
-    .hw-warning {
-      display: none;
-      margin-top: 12px;
-      padding: 14px;
-      background: rgba(239, 68, 68, 0.08);
-      border: 1px solid rgba(239, 68, 68, 0.25);
-      border-radius: 12px;
-      color: #fca5a5;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      text-align: center;
-      line-height: 1.5;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }
     .footer {
       text-align: center;
-      margin-top: 24px;
-      font-size: 11px;
-      color: #4b5563;
-      font-family: 'JetBrains Mono', monospace;
+      margin-top: 16px;
+      font-size: 9px;
+      color: var(--text-muted);
     }
     .footer a {
-      color: #4b5563;
+      color: var(--text-muted);
       text-decoration: none;
-      transition: color 0.2s ease;
-    }
-    .footer a:hover {
-      color: var(--text-main);
     }
     @media (max-width: 480px) {
       .grid { grid-template-columns: 1fr; }
-      .tabs { flex-direction: column; }
-      .action-row { flex-direction: column; }
     }
     .dashboard-section {
-      background: rgba(255, 255, 255, 0.02);
+      background: #020203;
       border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 16px;
-      margin-top: 20px;
-      box-shadow: inset 0 2px 8px rgba(0,0,0,0.3);
+      border-radius: 4px;
+      padding: 10px;
+      margin-top: 12px;
+      text-align: left;
     }
     .dashboard-box {
-      margin-top: 10px;
-      max-height: 240px;
+      margin-top: 6px;
+      max-height: 160px;
       overflow-y: auto;
     }
     .scan-table {
       width: 100%;
       border-collapse: collapse;
-      font-family: 'JetBrains Mono', monospace;
       font-size: 11px;
     }
     .scan-table th, .scan-table td {
-      padding: 8px 10px;
+      padding: 4px 6px;
       text-align: left;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      border-bottom: 1px solid var(--border-color);
     }
     .scan-table th {
       color: var(--text-muted);
       font-weight: 600;
-      text-transform: uppercase;
       font-size: 9px;
-      letter-spacing: 0.5px;
     }
-    .rssi-bar-container {
-      width: 60px;
-      height: 6px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 3px;
-      display: inline-block;
-      vertical-align: middle;
-      margin-right: 8px;
-      overflow: hidden;
-    }
-    .rssi-bar {
-      height: 100%;
-      border-radius: 3px;
-    }
-    .rssi-high { background: #10b981; }
-    .rssi-medium { background: #f59e0b; }
-    .rssi-low { background: #ef4444; }
     .client-card {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 8px;
-      padding: 10px 14px;
-      margin-bottom: 6px;
+      background: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: 2px;
+      padding: 6px 10px;
+      margin-bottom: 3px;
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
     .client-mac {
-      font-family: 'JetBrains Mono', monospace;
       font-weight: 700;
       color: #34d399;
-      font-size: 12px;
+      font-size: 11px;
     }
     .client-status {
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: rgba(16, 185, 129, 0.1);
+      font-size: 9px;
+      padding: 1px 3px;
+      border-radius: 2px;
+      background: rgba(16, 185, 129, 0.05);
       color: #10b981;
-      border: 1px solid rgba(16, 185, 129, 0.2);
-      font-family: 'JetBrains Mono', monospace;
+      border: 1px solid rgba(16, 185, 129, 0.1);
+    }
+
+    /* Modal style */
+    .modal {
+      display: none; 
+      position: fixed; 
+      z-index: 1000; 
+      left: 0;
+      top: 0;
+      width: 100%; 
+      height: 100%; 
+      background-color: rgba(0,0,0,0.85); 
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-content {
+      background-color: #0c0c0e;
+      margin: auto;
+      padding: 16px;
+      border: 1px solid var(--primary-color);
+      border-radius: 4px;
+      width: 85%;
+      max-width: 450px;
+      color: #fca5a5;
+      font-size: 11px;
+      position: relative;
+      text-align: left;
+    }
+    .close-btn {
+      color: var(--text-muted);
+      position: absolute;
+      top: 4px;
+      right: 10px;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
     }
   </style>
 </head>
 <body>
 <div class="container">
-  <h1>⚡ ESP<span>TOOL2</span></h1>
+  <pre class="ascii-art">
+ _____ ____  ____ _____ ___   ___  _     ____  
+| ____/ ___||  _ \_   _/ _ \ / _ \| |   |___ \ 
+|  _| \___ \| |_) || || | | | | | | |     __) |
+| |___ ___) |  __/ | || |_| | |_| | |___ / __/ 
+|_____|____/|_|    |_| \___/ \___/|_____|_____|</pre>
   <div class="sub">Multi-band Wireless Console</div>
 
   <div class="connection-status" id="conn-status">
     <div class="status-info">
       <span class="status-dot offline" id="status-dot"></span>
-      <span id="status-text">Slave ESP32-S3: Офлайн</span>
+      <span id="status-text">Slave ESP32-S3: OFFLINE</span>
     </div>
-    <button class="btn-check" onclick="checkConnection()">🔄 Проверить</button>
+    <button class="btn-check" onclick="checkConnection()">REFRESH</button>
   </div>
 
   <div class="tabs" id="tabs">
-    <button class="tab active" data-tab="wifi">📡 Wi-Fi</button>
-    <button class="tab" data-tab="ble">🔵 Bluetooth</button>
-    <button class="tab" data-tab="ghz">📶 2.4GHz</button>
-    <button class="tab" data-tab="subghz">📻 Sub-GHz</button>
-    <button class="tab" data-tab="ir">📺 IR</button>
+    <button class="tab active" data-tab="wifi">Wi-Fi</button>
+    <button class="tab" data-tab="ble">Bluetooth</button>
+    <button class="tab" data-tab="ghz">2.4GHz</button>
+    <button class="tab" data-tab="subghz">Sub-GHz</button>
+    <button class="tab" data-tab="ir">IR</button>
   </div>
 
   <div id="tab-wifi" class="tab-content active">
     <div class="grid">
-      <button class="attack-btn selected" data-attack="beacon" onclick="selectAttack(this)"><span class="icon">📡</span><span class="label">Beacon Spam</span></button>
-      <button class="attack-btn" data-attack="deauth" onclick="selectAttack(this)"><span class="icon">🔓</span><span class="label">Deauth</span></button>
-      <button class="attack-btn" data-attack="probe" onclick="selectAttack(this)"><span class="icon">📶</span><span class="label">Probe Flood</span></button>
-      <button class="attack-btn" data-attack="wifi_scan" onclick="selectAttack(this)"><span class="icon">🔍</span><span class="label">Wi-Fi Scan</span></button>
-      <button class="attack-btn" data-attack="evil_twin" onclick="selectAttack(this)"><span class="icon">🎭</span><span class="label">Evil Twin</span></button>
+      <button class="attack-btn selected" data-attack="beacon" onclick="selectAttack(this)"><span class="label">Beacon Spam</span></button>
+      <button class="attack-btn" data-attack="deauth" onclick="selectAttack(this)"><span class="label">Deauth</span></button>
+      <button class="attack-btn" data-attack="probe" onclick="selectAttack(this)"><span class="label">Probe Flood</span></button>
+      <button class="attack-btn" data-attack="wifi_scan" onclick="selectAttack(this)"><span class="label">Wi-Fi Scan</span></button>
+      <button class="attack-btn" data-attack="evil_twin" onclick="selectAttack(this)"><span class="label">Evil Twin</span></button>
+      <button class="attack-btn" data-attack="powerful_jammer" onclick="selectAttack(this)"><span class="label">Powerful Jammer</span></button>
     </div>
   </div>
 
   <div id="tab-ble" class="tab-content">
     <div class="grid">
-      <button class="attack-btn" data-attack="ble_scan" onclick="selectAttack(this)"><span class="icon">🔍</span><span class="label">BLE Scan</span></button>
-      <button class="attack-btn" data-attack="ble_spoofer" onclick="selectAttack(this)"><span class="icon">🔄</span><span class="label">BLE Spoofer</span></button>
-      <button class="attack-btn" data-attack="ble_jammer" onclick="selectAttack(this)"><span class="icon">🔵</span><span class="label">BLE Jammer</span></button>
-      <button class="attack-btn" data-attack="sour_apple" onclick="selectAttack(this)"><span class="icon">🍏</span><span class="label">Sour Apple</span></button>
+      <button class="attack-btn" data-attack="ble_scan" onclick="selectAttack(this)"><span class="label">BLE Scan</span></button>
+      <button class="attack-btn" data-attack="ble_spoofer" onclick="selectAttack(this)"><span class="label">BLE Spoofer</span></button>
+      <button class="attack-btn" data-attack="ble_jammer" onclick="selectAttack(this)"><span class="label">BLE Jammer</span></button>
+      <button class="attack-btn" data-attack="sour_apple" onclick="selectAttack(this)"><span class="label">Sour Apple</span></button>
     </div>
   </div>
 
   <div id="tab-ghz" class="tab-content">
     <div class="grid">
-      <button class="attack-btn" data-attack="ghz_scan" onclick="selectAttack(this)"><span class="icon">📶</span><span class="label">2.4GHz Scanner</span></button>
-      <button class="attack-btn" data-attack="protokill" onclick="selectAttack(this)"><span class="icon">⚡</span><span class="label">Protokill</span></button>
+      <button class="attack-btn" data-attack="ghz_scan" onclick="selectAttack(this)"><span class="label">2.4GHz Scanner</span></button>
+      <button class="attack-btn" data-attack="protokill" onclick="selectAttack(this)"><span class="label">Protokill</span></button>
     </div>
   </div>
 
   <div id="tab-subghz" class="tab-content">
     <div class="grid">
-      <button class="attack-btn" data-attack="subghz_replay" onclick="selectAttack(this)"><span class="icon">📻</span><span class="label">Replay</span></button>
-      <button class="attack-btn" data-attack="subghz_jammer" onclick="selectAttack(this)"><span class="icon">📻</span><span class="label">Jammer</span></button>
+      <button class="attack-btn" data-attack="subghz_replay" onclick="selectAttack(this)"><span class="label">Replay</span></button>
+      <button class="attack-btn" data-attack="subghz_jammer" onclick="selectAttack(this)"><span class="label">Jammer</span></button>
     </div>
   </div>
 
   <div id="tab-ir" class="tab-content">
     <div class="grid">
-      <button class="attack-btn" data-attack="ir_replay" onclick="selectAttack(this)"><span class="icon">📺</span><span class="label">IR Replay</span></button>
+      <button class="attack-btn" data-attack="ir_replay" onclick="selectAttack(this)"><span class="label">IR Replay</span></button>
     </div>
   </div>
 
+  <div style="display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 12px; font-size: 11px; padding-left: 2px;">
+    <input type="checkbox" id="boost-mode" onchange="toggleBoostMode(this)" style="accent-color: var(--primary-color);">
+    <label for="boost-mode" style="cursor: pointer; color: var(--text-muted);">Enable Boost Mode (Extreme Transmission)</label>
+  </div>
+
   <div class="action-row">
-    <button class="btn-start" onclick="sendCmd('start')">▶️ Запустить</button>
-    <button class="btn-stop" onclick="sendCmd('stop')">⏹️ Остановить</button>
+    <button class="btn-start" onclick="sendCmd('start')">START</button>
+    <button class="btn-stop" onclick="sendCmd('stop')">STOP</button>
   </div>
 
-  <div class="status" id="status">🟢 Готов к работе</div>
-
-  <div class="console-header">
-    <span>📋 КОНСОЛЬ ОТЧЕТОВ И ЛОГОВ АТАК</span>
-    <button class="btn-check" onclick="clearLogs()">Очистить</button>
-  </div>
-  <div class="console-box" id="console-box">Ожидание подключения Slave-платы...</div>
+  <div class="status" id="status">STATUS: READY</div>
 
   <div class="dashboard-section" id="dashboard-section" style="display: none;">
     <div class="console-header" style="margin-top: 0;">
-      <span id="dashboard-title">📊 РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ</span>
+      <span id="dashboard-title">SCAN RESULTS</span>
     </div>
     <div class="dashboard-box" id="dashboard-box"></div>
   </div>
 
-  <div class="hw-warning" id="hw-warning"></div>
-  <div class="footer">ESPTOOL2 · <a href="#" onclick="location.reload()">⟳ обновить консоль</a></div>
+  <div class="console-header">
+    <span>CONSOLE LOGS</span>
+    <button class="btn-clear" onclick="clearLogs()">CLEAR</button>
+  </div>
+  <div class="console-box" id="console-box">Awaiting connection...</div>
+
+  <div class="footer">ESPTOOL2 · <a href="#" onclick="location.reload()">Reload Console</a></div>
+</div>
+
+<div id="modal-container" class="modal">
+  <div class="modal-content">
+    <span class="close-btn" onclick="closeModal()">&times;</span>
+    <div id="modal-text"></div>
+  </div>
 </div>
 
 <script>
   let selectedAttack = 'beacon';
+  let isBoostMode = false;
   const warnings = {
-    ghz_scan: '⚠️ Требуется внешний радиомодуль NRF24L01 для работы 2.4GHz Scanner!',
-    protokill: '⚠️ Требуется внешний радиомодуль NRF24L01 для работы Protokill!',
-    subghz_replay: '⚠️ Требуется внешний радиомодуль CC1101 для работы Sub-GHz Replay!',
-    subghz_jammer: '⚠️ Требуется внешний радиомодуль CC1101 для работы Sub-GHz Jammer!',
-    ir_replay: '⚠️ Требуется подключенный инфракрасный диод для работы IR Replay!'
+    ghz_scan: 'External NRF24L01 radio module is required for 2.4GHz Scanner!',
+    protokill: 'External NRF24L01 radio module is required for Protokill!',
+    subghz_replay: 'External CC1101 radio module is required for Sub-GHz Replay!',
+    subghz_jammer: 'External CC1101 radio module is required for Sub-GHz Jammer!',
+    ir_replay: 'Connected Infrared LED is required for IR Replay!'
   };
+
+  const reportingAttacks = ['wifi_scan', 'ble_scan', 'evil_twin'];
 
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', function() {
@@ -524,15 +459,35 @@ const String webpage = R"rawliteral(
     document.querySelectorAll('.attack-btn').forEach(b => b.classList.remove('selected'));
     btn.classList.add('selected');
     selectedAttack = btn.dataset.attack;
-    document.getElementById('status').innerHTML = '🎯 Целевая атака: ' + btn.querySelector('.label').textContent;
+    document.getElementById('status').innerHTML = 'TARGET: ' + btn.querySelector('.label').textContent.toUpperCase();
     
-    const warningDiv = document.getElementById('hw-warning');
     if (warnings[selectedAttack]) {
-      warningDiv.innerHTML = warnings[selectedAttack];
-      warningDiv.style.display = 'block';
-    } else {
-      warningDiv.style.display = 'none';
+      showModal(warnings[selectedAttack]);
     }
+    
+    updateDashboardUI();
+  }
+
+  function toggleBoostMode(checkbox) {
+    if (checkbox.checked) {
+      if (confirm("WARNING: Boost Mode increases transmitter output and packet rate. This may cause high power consumption, board heating, or system crash. Proceed?")) {
+        isBoostMode = true;
+      } else {
+        checkbox.checked = false;
+        isBoostMode = false;
+      }
+    } else {
+      isBoostMode = false;
+    }
+  }
+
+  function showModal(text) {
+    document.getElementById('modal-text').innerHTML = text;
+    document.getElementById('modal-container').style.display = 'flex';
+  }
+
+  function closeModal() {
+    document.getElementById('modal-container').style.display = 'none';
   }
 
   let wifiNetworks = [];
@@ -550,13 +505,28 @@ const String webpage = R"rawliteral(
       if (line.includes('[WIFI_DEV]')) {
         const parts = line.split('[WIFI_DEV]')[1].split('|');
         if (parts.length >= 2) {
-          wifiTemp.push({ ssid: parts[0], rssi: parseInt(parts[1]), enc: parts[2] || 'OPEN' });
+          wifiTemp.push({ 
+            ssid: parts[0], 
+            rssi: parseInt(parts[1]), 
+            enc: parts[2] || 'OPEN', 
+            bssid: parts[3] || 'UNKNOWN' 
+          });
         }
       }
       else if (line.includes('[BLE_DEV]')) {
         const parts = line.split('[BLE_DEV]')[1].split('|');
-        if (parts.length >= 2) {
-          bleTemp.push({ name: parts[0], rssi: parseInt(parts[1]) });
+        if (parts.length >= 3) {
+          bleTemp.push({ 
+            name: parts[0], 
+            addr: parts[1], 
+            rssi: parseInt(parts[2]) 
+          });
+        } else if (parts.length === 2) {
+          bleTemp.push({ 
+            name: parts[0], 
+            addr: 'UNKNOWN', 
+            rssi: parseInt(parts[1]) 
+          });
         }
       }
       else if (line.includes('[EVIL_CLIENT]')) {
@@ -579,51 +549,89 @@ const String webpage = R"rawliteral(
     const dashBox = document.getElementById('dashboard-box');
     const dashTitle = document.getElementById('dashboard-title');
     
-    if (wifiNetworks.length > 0) {
-      dashSection.style.display = 'block';
-      dashTitle.innerHTML = '📊 НАЙДЕННЫЕ WI-FI СЕТИ (' + wifiNetworks.length + ')';
-      
-      let html = '<table class="scan-table"><thead><tr><th>SSID</th><th>Сигнал</th><th>Защита</th></tr></thead><tbody>';
-      wifiNetworks.forEach(net => {
-        let rssiPercent = Math.min(Math.max(2 * (net.rssi + 100), 0), 100);
-        let rssiClass = 'rssi-high';
-        if (net.rssi < -80) rssiClass = 'rssi-low';
-        else if (net.rssi < -67) rssiClass = 'rssi-medium';
-        
-        html += '<tr><td style="font-weight:600;color:#fff;">' + net.ssid + '</td><td><div class="rssi-bar-container"><div class="rssi-bar ' + rssiClass + '" style="width:' + rssiPercent + '%;"></div></div><span>' + net.rssi + ' dBm</span></td><td><span style="color:#ee3a17;font-weight:600;">' + net.enc + '</span></td></tr>';
-      });
-      html += '</tbody></table>';
-      dashBox.innerHTML = html;
-    } 
-    else if (bleDevices.length > 0) {
-      dashSection.style.display = 'block';
-      dashTitle.innerHTML = '📊 БЛИЖАЙШИЕ BLE УСТРОЙСТВА (' + bleDevices.length + ')';
-      
-      let html = '<table class="scan-table"><thead><tr><th>Устройство / MAC</th><th>Сигнал (RSSI)</th></tr></thead><tbody>';
-      bleDevices.forEach(dev => {
-        let rssiPercent = Math.min(Math.max(2 * (dev.rssi + 100), 0), 100);
-        let rssiClass = 'rssi-high';
-        if (dev.rssi < -80) rssiClass = 'rssi-low';
-        else if (dev.rssi < -67) rssiClass = 'rssi-medium';
-        
-        html += '<tr><td style="font-weight:600;color:#fff;">' + dev.name + '</td><td><div class="rssi-bar-container"><div class="rssi-bar ' + rssiClass + '" style="width:' + rssiPercent + '%;"></div></div><span>' + dev.rssi + ' dBm</span></td></tr>';
-      });
-      html += '</tbody></table>';
-      dashBox.innerHTML = html;
-    }
-    else if (evilTwinClients.length > 0) {
-      dashSection.style.display = 'block';
-      dashTitle.innerHTML = '👥 ПОДКЛЮЧЕННЫЕ КЛИЕНТЫ EVIL TWIN (' + evilTwinClients.length + ')';
-      
-      let html = '<div style="display:grid;grid-template-columns:1fr;gap:6px;">';
-      evilTwinClients.forEach(client => {
-        html += '<div class="client-card"><span class="client-mac">' + client + '</span><span class="client-status">Подключен</span></div>';
-      });
-      html += '</div>';
-      dashBox.innerHTML = html;
-    }
-    else {
+    if (!reportingAttacks.includes(selectedAttack)) {
       dashSection.style.display = 'none';
+      return;
+    }
+
+    dashSection.style.display = 'block';
+    
+    if (selectedAttack === 'wifi_scan') {
+      dashTitle.innerHTML = 'WIFI NETWORKS DETECTED';
+      if (wifiNetworks.length === 0) {
+        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING WIFI SCAN RESULTS...</div>';
+      } else {
+        let html = '<table class="scan-table"><thead><tr><th>SSID</th><th>BSSID</th><th>SIGNAL</th><th>SECURITY</th><th>LEVEL</th></tr></thead><tbody>';
+        wifiNetworks.forEach(net => {
+          let rssiClass = 'rssi-high';
+          let levelText = 'STRONG';
+          if (net.rssi < -80) {
+            rssiClass = 'offline';
+            levelText = 'WEAK';
+          } else if (net.rssi < -67) {
+            rssiClass = 'testing';
+            levelText = 'MEDIUM';
+          } else {
+            rssiClass = 'online';
+          }
+          
+          let secRating = 'SECURE';
+          if (net.enc === 'OPEN') secRating = 'VULNERABLE';
+          else if (net.enc === 'WEP') secRating = 'WEAK';
+          
+          html += '<tr>' +
+                  '<td style="font-weight:600;color:#fff;">' + net.ssid + '</td>' +
+                  '<td style="color:var(--text-muted);">' + net.bssid + '</td>' +
+                  '<td>' + net.rssi + ' dBm</td>' +
+                  '<td><span style="color:' + (secRating === 'VULNERABLE' ? 'var(--primary-color)' : 'var(--text-muted)') + ';">' + net.enc + ' (' + secRating + ')</span></td>' +
+                  '<td><span class="status-dot ' + rssiClass + '"></span> ' + levelText + '</td>' +
+                  '</tr>';
+        });
+        html += '</tbody></table>';
+        dashBox.innerHTML = html;
+      }
+    } 
+    else if (selectedAttack === 'ble_scan') {
+      dashTitle.innerHTML = 'BLE DEVICES DETECTED';
+      if (bleDevices.length === 0) {
+        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING BLE SCAN RESULTS...</div>';
+      } else {
+        let html = '<table class="scan-table"><thead><tr><th>DEVICE</th><th>MAC ADDRESS</th><th>SIGNAL</th><th>LEVEL</th></tr></thead><tbody>';
+        bleDevices.forEach(dev => {
+          let rssiClass = 'rssi-high';
+          let levelText = 'STRONG';
+          if (dev.rssi < -80) {
+            rssiClass = 'offline';
+            levelText = 'WEAK';
+          } else if (dev.rssi < -67) {
+            rssiClass = 'testing';
+            levelText = 'MEDIUM';
+          } else {
+            rssiClass = 'online';
+          }
+          html += '<tr>' +
+                  '<td style="font-weight:600;color:#fff;">' + dev.name + '</td>' +
+                  '<td style="color:var(--text-muted);">' + dev.addr + '</td>' +
+                  '<td>' + dev.rssi + ' dBm</td>' +
+                  '<td><span class="status-dot ' + rssiClass + '"></span> ' + levelText + '</td>' +
+                  '</tr>';
+        });
+        html += '</tbody></table>';
+        dashBox.innerHTML = html;
+      }
+    }
+    else if (selectedAttack === 'evil_twin') {
+      dashTitle.innerHTML = 'EVIL TWIN CONNECTED CLIENTS';
+      if (evilTwinClients.length === 0) {
+        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">NO CLIENTS CONNECTED</div>';
+      } else {
+        let html = '<div style="display:grid;grid-template-columns:1fr;gap:4px;">';
+        evilTwinClients.forEach(client => {
+          html += '<div class="client-card"><span class="client-mac">' + client + '</span><span class="client-status">CONNECTED</span></div>';
+        });
+        html += '</div>';
+        dashBox.innerHTML = html;
+      }
     }
   }
 
@@ -635,18 +643,24 @@ const String webpage = R"rawliteral(
       updateDashboardUI();
     }
     const status = document.getElementById('status');
-    status.innerHTML = '⏳ Отправка команды на Slave...';
-    fetch('/cmd?q=' + cmd + '&attack=' + selectedAttack)
+    status.innerHTML = 'PENDING: SENDING COMMAND TO SLAVE...';
+    
+    let attackParam = selectedAttack;
+    if (cmd === 'start' && isBoostMode) {
+      attackParam = selectedAttack + '_boost';
+    }
+    
+    fetch('/cmd?q=' + cmd + '&attack=' + attackParam)
       .then(r => r.text())
-      .then(data => { status.innerHTML = '✅ ' + data; })
-      .catch(() => { status.innerHTML = '❌ Ошибка связи с Master ESP32'; });
+      .then(data => { status.innerHTML = 'STATUS: ' + data.toUpperCase(); })
+      .catch(() => { status.innerHTML = 'ERROR: MASTER ESP32 UNREACHABLE'; });
   }
 
   function checkConnection() {
     const dot = document.getElementById('status-dot');
     const text = document.getElementById('status-text');
     dot.className = 'status-dot testing';
-    text.innerHTML = 'Slave ESP32-S3: Запрос пинга...';
+    text.innerHTML = 'Slave ESP32-S3: PINGING...';
     
     fetch('/cmd?q=ping&attack=')
       .then(() => {
@@ -660,21 +674,21 @@ const String webpage = R"rawliteral(
               
               if (status === 'online') {
                 dot.className = 'status-dot online';
-                text.innerHTML = 'Slave ESP32-S3: Онлайн' + (mac ? ' (' + mac + ')' : '');
+                text.innerHTML = 'Slave ESP32-S3: ONLINE' + (mac ? ' (' + mac + ')' : '');
               } else {
                 dot.className = 'status-dot offline';
-                text.innerHTML = 'Slave ESP32-S3: Офлайн';
+                text.innerHTML = 'Slave ESP32-S3: OFFLINE';
               }
             })
             .catch(() => {
               dot.className = 'status-dot offline';
-              text.innerHTML = 'Slave ESP32-S3: Офлайн';
+              text.innerHTML = 'Slave ESP32-S3: OFFLINE';
             });
         }, 1200);
       })
       .catch(() => {
         dot.className = 'status-dot offline';
-        text.innerHTML = 'Slave ESP32-S3: Офлайн';
+        text.innerHTML = 'Slave ESP32-S3: OFFLINE';
       });
   }
 
@@ -692,20 +706,20 @@ const String webpage = R"rawliteral(
 
         const consoleBox = document.getElementById('console-box');
         if (filteredLogs.trim() === '') {
-          consoleBox.innerHTML = 'Логи отсутствуют. Ожидание атак...';
+          consoleBox.innerHTML = 'Logs are empty. Standby...';
         } else {
           consoleBox.innerHTML = filteredLogs;
           consoleBox.scrollTop = consoleBox.scrollHeight;
         }
       })
       .catch(err => {
-        console.error("Ошибка обновления консоли логов:", err);
+        console.error("Console update error:", err);
       });
   }
 
   function clearLogs() {
     isClearing = true;
-    document.getElementById('console-box').innerHTML = 'Очистка логов на сервере...';
+    document.getElementById('console-box').innerHTML = 'Clearing server logs...';
     wifiNetworks = [];
     bleDevices = [];
     evilTwinClients = [];
@@ -714,20 +728,20 @@ const String webpage = R"rawliteral(
     fetch('/clear_logs')
       .then(r => r.text())
       .then(() => {
-        document.getElementById('console-box').innerHTML = 'Лог консоли очищен.';
+        document.getElementById('console-box').innerHTML = 'Console cleared.';
         setTimeout(() => { isClearing = false; }, 600);
       })
       .catch(err => {
-        document.getElementById('console-box').innerHTML = '❌ Ошибка связи с сервером при очистке.';
+        document.getElementById('console-box').innerHTML = 'Error clearing logs.';
         console.error(err);
         isClearing = false;
       });
   }
 
-  // Первая автопроверка
+  // Initial connection check
   setTimeout(checkConnection, 1000);
   
-  // Постоянный опрос логов каждые 1.5 секунды
+  // Log poll interval (1.5 seconds)
   setInterval(updateConsole, 1500);
 </script>
 </body>

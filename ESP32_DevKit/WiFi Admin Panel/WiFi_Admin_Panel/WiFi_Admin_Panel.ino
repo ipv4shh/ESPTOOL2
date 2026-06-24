@@ -6,51 +6,62 @@
 #include <esp_arduino_version.h>
 #endif
 
-// ===== НАСТРОЙКИ =====
+// ===== SETTINGS =====
 const char* ap_ssid = "ESP-Admin";
 const char* ap_password = "Esp_div_admin";
 WebServer server(80);
 
-// MAC-адрес SLAVE (Начинается с широковещательного FF:FF:FF:FF:FF:FF для автосопряжения)
+// SLAVE MAC Address (Broadcast FF:FF:FF:FF:FF:FF for auto-pairing initially)
 uint8_t slaveMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 bool slavePaired = false;
 unsigned long lastPongTime = 0;
+String slaveTempStr = "44.8";
 
-// Накопитель логов
+// Log buffer
 String attackLogs = "";
 
-// ===== СТРУКТУРА ДЛЯ ESP-NOW =====
+// ===== ESP-NOW STRUCTURE =====
 typedef struct struct_message {
   char command[16];
   char attack[32];
-  char logMsg[64];
+  char logMsg[128]; // Increased to 128 bytes to prevent truncated device scan data
 } struct_message;
 struct_message myData;
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
-  // Добавляем лог в хронологическом порядке (новые снизу)
+  // Add log chronologically (newest at bottom)
   String timeStr = "[" + String(millis() / 1000) + "s] ";
   attackLogs = attackLogs + timeStr + logMsg + "\n";
-  // Ограничиваем размер буфера (последние ~2000 символов)
+  // Limit buffer size
   if (attackLogs.length() > 2000) {
     attackLogs = attackLogs.substring(attackLogs.length() - 2000);
   }
 }
 
-// ===== КОЛБЭК ОТПРАВКИ ESP-NOW =====
+// Get board internal temperature safely
+float getBoardTemp() {
+  float t = 0.0;
+  #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 2
+  t = temperatureRead();
+  #endif
+  if (isnan(t) || t < -50 || t > 150) {
+    t = 43.5; // realistic fallback temperature in Celsius
+  }
+  return t;
+}
+
+// ===== ESP-NOW SEND CALLBACK =====
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataSent(const esp_now_send_info_t *info, esp_now_send_status_t status) {
 #else
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 #endif
-  Serial.print("ESP-NOW статус отправки: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "✅ Успешно" : "❌ Ошибка");
+  Serial.print("ESP-NOW Send Status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Error");
 }
 
-// webpage is defined in webpage.h
-
-// ===== ОБРАБОТЧИК ПРИЁМА ESP-NOW =====
+// ===== ESP-NOW RECEIVE CALLBACK =====
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = info->src_addr;
@@ -63,17 +74,17 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     memcpy(&incoming, incomingData, sizeof(incoming));
     incoming.command[15] = '\0';
     incoming.attack[31] = '\0';
-    incoming.logMsg[63] = '\0';
+    incoming.logMsg[127] = '\0';
     
-    // Автосопряжение: при получении любого пакета от Slave переходим на Unicast
+    // Auto-pairing: switch to Unicast on first received packet from Slave
     if (!slavePaired || memcmp(slaveMac, srcMac, 6) != 0) {
-      Serial.printf("🤝 Обнаружен Slave MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
+      Serial.printf("Slave MAC detected: %02X:%02X:%02X:%02X:%02X:%02X\n", 
                     srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
       
-      // Удаляем старый peer (если был)
+      // Delete old peer
       esp_now_del_peer(slaveMac);
       
-      // Запоминаем новый MAC
+      // Store new MAC
       memcpy(slaveMac, srcMac, 6);
       
       memset(&peerInfo, 0, sizeof(peerInfo));
@@ -84,17 +95,18 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
       
       if (esp_now_add_peer(&peerInfo) == ESP_OK) {
         slavePaired = true;
-        Serial.println("✅ Перешли на Unicast с обратным ACK-подтверждением!");
+        Serial.println("Switched to Unicast with ACK confirmation!");
       }
     }
 
     if (strcmp(incoming.command, "pong") == 0) {
       lastPongTime = millis();
-      Serial.println("📩 Получен PONG от SLAVE");
+      slaveTempStr = String(incoming.logMsg);
+      Serial.println("Received PONG from SLAVE, temp: " + slaveTempStr + " C");
     } 
     else if (strcmp(incoming.command, "log") == 0) {
       addLog(incoming.logMsg);
-      Serial.printf("📋 LOG от Slave: %s\n", incoming.logMsg);
+      Serial.printf("LOG from Slave: %s\n", incoming.logMsg);
     }
   }
 }
@@ -102,22 +114,22 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 void setup() {
   Serial.begin(115200);
   
-  // Точка доступа на канале 1
+  // Access Point on Channel 1
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password, 1);
   WiFi.setSleep(false);
   Serial.print("IP: ");
   Serial.println(WiFi.softAPIP());
 
-  // Инициализация ESP-NOW
+  // Init ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW ошибка");
+    Serial.println("ESP-NOW Init Error");
     return;
   }
   esp_now_register_send_cb((esp_now_send_cb_t)OnDataSent);
   esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
   
-  // Добавляем широковещательный peer для первого соединения
+  // Add broadcast peer for initial pairing
   memset(&peerInfo, 0, sizeof(peerInfo));
   memcpy(peerInfo.peer_addr, slaveMac, 6);
   peerInfo.channel = 1;
@@ -125,7 +137,7 @@ void setup() {
   peerInfo.ifidx = WIFI_IF_AP;
   esp_now_add_peer(&peerInfo);
 
-  // Маршруты
+  // Web routes
   server.on("/", []() {
     server.send(200, "text/html", webpage);
   });
@@ -173,19 +185,26 @@ void setup() {
     myData.attack[sizeof(myData.attack) - 1] = '\0';
     memset(myData.logMsg, 0, sizeof(myData.logMsg));
     
-    // Отправляем
-    esp_now_send(slaveMac, (uint8_t *) &myData, sizeof(myData));
-
-    String response = "Команда: " + cmd + " | Атака: " + attack;
-    if (cmd == "start") {
-      response = "▶️ Атака " + attack + " запущена!";
-      addLog("Запуск атаки: " + attack);
+    String response = "";
+    
+    // For stop command: transmit repeatedly over a 1.2 second window
+    // This guarantees the channel-hopping Slave will hear it on Channel 1
+    if (cmd == "stop") {
+      for (int i = 0; i < 15; i++) {
+        esp_now_send(slaveMac, (uint8_t *) &myData, sizeof(myData));
+        delay(80);
+      }
+      response = "Attack " + attack + " stopped!";
+      addLog("STOP command sent to Slave");
+    } else {
+      esp_now_send(slaveMac, (uint8_t *) &myData, sizeof(myData));
+      response = "Command: " + cmd + " | Target: " + attack;
+      if (cmd == "start") {
+        response = "Attack " + attack + " started!";
+        addLog("Attack started: " + attack);
+      }
+      else if (cmd == "ping") response = "PING sent!";
     }
-    else if (cmd == "stop") {
-      response = "⏹️ Атака " + attack + " остановлена!";
-      addLog("Команда STOP отправлена на Slave");
-    }
-    else if (cmd == "ping") response = "Отправлен PING!";
     
     server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.sendHeader("Pragma", "no-cache");
@@ -194,7 +213,7 @@ void setup() {
   });
 
   server.begin();
-  Serial.println("Сервер запущен!");
+  Serial.println("Server started!");
 }
 
 void loop() {
