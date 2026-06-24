@@ -832,8 +832,8 @@ void setup() {
     Serial.println("ESP-NOW ошибка");
     return;
   }
-  esp_now_register_send_cb(OnDataSent);
-  esp_now_register_recv_cb(OnDataRecv);
+  esp_now_register_send_cb((esp_now_send_cb_t)OnDataSent);
+  esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
   
   // Добавляем широковещательный peer для первого соединения
   memset(&peerInfo, 0, sizeof(peerInfo));

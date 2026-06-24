@@ -558,7 +558,7 @@ void setup() {
     Serial.println("❌ ESP-NOW ошибка инициализации");
     return;
   }
-  esp_now_register_recv_cb(OnDataRecv);
+  esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
   Serial.println("✅ SLAVE готов к приёму команд");
   Serial.print("📡 Мой MAC: ");
   Serial.println(WiFi.macAddress());
