@@ -1,10 +1,19 @@
- #include <WiFi.h>
+#include <WiFi.h>
 #include <WebServer.h>
 #include <esp_now.h>
+#include <Preferences.h>
 #include "webpage.h"
 #if __has_include(<esp_arduino_version.h>)
 #include <esp_arduino_version.h>
 #endif
+
+// ===== XOR CRYPT HELPER =====
+void XOR_crypt(uint8_t* data, size_t len) {
+  const uint8_t key[] = { 0xDE, 0xAD, 0xBE, 0xEF };
+  for (size_t i = 0; i < len; i++) {
+    data[i] ^= key[i % 4];
+  }
+}
 
 // ===== SETTINGS =====
 const char* ap_ssid = "ESP-Admin";
@@ -21,10 +30,9 @@ String slaveTempStr = "44.8";
 bool isStopping = false;
 unsigned long lastStopSendTime = 0;
 int stopSendCount = 0;
-struct_message stopData;
 
 // Circular Log Buffer
-#define MAX_LOG_MESSAGES 40
+#define MAX_LOG_MESSAGES 60
 String logBuffer[MAX_LOG_MESSAGES];
 int logHead = 0;
 int logCount = 0;
@@ -33,9 +41,10 @@ int logCount = 0;
 typedef struct struct_message {
   char command[16];
   char attack[32];
-  char logMsg[128]; // Increased to 128 bytes to prevent truncated device scan data
+  char logMsg[200]; // Increased to 200 bytes to prevent truncated device scan data (fits ESP-NOW limit)
 } struct_message;
 struct_message myData;
+struct_message stopData; // Defined globally to avoid conflict
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
@@ -98,9 +107,10 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   if (len == sizeof(myData)) {
     struct_message incoming;
     memcpy(&incoming, incomingData, sizeof(incoming));
+    XOR_crypt((uint8_t*)&incoming, sizeof(incoming)); // Decrypt
     incoming.command[15] = '\0';
     incoming.attack[31] = '\0';
-    incoming.logMsg[127] = '\0';
+    incoming.logMsg[199] = '\0';
     
     // Auto-pairing: switch to Unicast on first received packet from Slave
     if (!slavePaired || memcmp(slaveMac, srcMac, 6) != 0) {
@@ -122,6 +132,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
       if (esp_now_add_peer(&peerInfo) == ESP_OK) {
         slavePaired = true;
         Serial.println("Switched to Unicast with ACK confirmation!");
+        
+        // Save to Preferences
+        Preferences prefs;
+        prefs.begin("esptool2", false);
+        prefs.putBytes("slaveMac", slaveMac, 6);
+        prefs.putBool("slavePaired", true);
+        prefs.end();
       }
     }
 
@@ -160,7 +177,18 @@ void setup() {
   esp_now_register_send_cb((esp_now_send_cb_t)OnDataSent);
   esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
   
-  // Add broadcast peer for initial pairing
+  // Load paired Slave MAC from Preferences
+  Preferences prefs;
+  prefs.begin("esptool2", true);
+  if (prefs.getBool("slavePaired", false)) {
+    prefs.getBytes("slaveMac", slaveMac, 6);
+    slavePaired = true;
+    Serial.printf("Loaded Slave MAC from Flash: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  slaveMac[0], slaveMac[1], slaveMac[2], slaveMac[3], slaveMac[4], slaveMac[5]);
+  }
+  prefs.end();
+
+  // Add peer
   memset(&peerInfo, 0, sizeof(peerInfo));
   memcpy(peerInfo.peer_addr, slaveMac, 6);
   peerInfo.channel = 1;
@@ -232,7 +260,9 @@ void setup() {
       response = "Attack " + attack + " stopping...";
       addLog("STOP command triggered");
     } else {
-      esp_now_send(slaveMac, (uint8_t *) &myData, sizeof(myData));
+      struct_message encryptedMyData = myData;
+      XOR_crypt((uint8_t*)&encryptedMyData, sizeof(encryptedMyData));
+      esp_now_send(slaveMac, (uint8_t *) &encryptedMyData, sizeof(encryptedMyData));
       response = "Command: " + cmd + " | Target: " + attack;
       if (cmd == "start") {
         response = "Attack " + attack + " started!";
@@ -257,7 +287,9 @@ void loop() {
   if (isStopping) {
     if (millis() - lastStopSendTime >= 80) {
       lastStopSendTime = millis();
-      esp_now_send(slaveMac, (uint8_t *) &stopData, sizeof(stopData));
+      struct_message encryptedStopData = stopData;
+      XOR_crypt((uint8_t*)&encryptedStopData, sizeof(encryptedStopData));
+      esp_now_send(slaveMac, (uint8_t *) &encryptedStopData, sizeof(encryptedStopData));
       stopSendCount++;
       if (stopSendCount >= 25) { // Try up to 25 times (2 seconds)
         isStopping = false;

