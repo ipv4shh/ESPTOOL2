@@ -45,7 +45,7 @@ typedef struct struct_message {
   char logMsg[180]; // Increased to 200 bytes to prevent truncated device scan data (fits ESP-NOW limit)
 } struct_message;
 struct_message myData;
-struct_message stopData = 0; // Defined globally to avoid conflict
+struct_message stopData = {0}; // Defined globally to avoid conflict
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
