@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <esp_now.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include "webpage.h"
 #if __has_include(<esp_arduino_version.h>)
 #include <esp_arduino_version.h>
@@ -44,10 +45,11 @@ typedef struct struct_message {
   char logMsg[200]; // Increased to 200 bytes to prevent truncated device scan data (fits ESP-NOW limit)
 } struct_message;
 struct_message myData;
-struct_message stopData = {0}; // Defined globally to avoid conflict
+struct_message stopData = 0; // Defined globally to avoid conflict
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
+  esp_task_wdt_reset();
   String timeStr = "[" + String(millis() / 1000) + "s] ";
   logBuffer[logHead] = timeStr + logMsg;
   logHead = (logHead + 1) % MAX_LOG_MESSAGES;
@@ -67,6 +69,7 @@ String getLogs() {
 }
 
 void clearLogs() {
+  esp_task_wdt_reset();
   logHead = 0;
   logCount = 0;
   for (int i = 0; i < MAX_LOG_MESSAGES; i++) {
@@ -161,6 +164,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 
 void setup() {
   Serial.begin(115200);
+  esp_task_wdt_init(15, true);
+  esp_task_wdt_add(NULL);
   
   // Access Point on Channel 1
   WiFi.mode(WIFI_AP);
@@ -194,9 +199,8 @@ void setup() {
   peerInfo.channel = 1;
   peerInfo.encrypt = false;
   peerInfo.ifidx = WIFI_IF_AP;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("Failed to add peer");
-  }
+  esp_now_add_peer(&peerInfo);
+  if (esp_now_add_peer(&peerInfo) != ESP_OK)  Serial.println("Failed to add peer");
 
   // Web routes
   server.on("/", []() {
@@ -287,6 +291,7 @@ void loop() {
   server.handleClient();
   
   if (isStopping) {
+    esp_task_wdt_reset();
     if (millis() - lastStopSendTime >= 80) {
       lastStopSendTime = millis();
       struct_message encryptedStopData = stopData;

@@ -369,6 +369,7 @@ void runProbeFloodStep() {
     pos += ssidLen;
 
     esp_wifi_80211_tx(WIFI_IF_STA, probePacket, pos, false);
+    esp_task_wdt_reset();
     
     if (random(100) == 0) {
       sendLogToMaster("[Probe] Flooding active scan requests (ch 1-13)");
@@ -685,15 +686,19 @@ void startBLEScan() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
-  BLEScanResults foundDevices = pBLEScan->start(5, false);
+  BLEScanResults *foundDevices = pBLEScan->start(5, false);
+  if (!foundDevices) {
+    sendLogToMaster("BLE Scan failed!");
+    return;
+  }
   
   char buf[64];
-  snprintf(buf, sizeof(buf), "[BLE] Found BLE devices: %d", foundDevices.getCount());
+  snprintf(buf, sizeof(buf), "[BLE] Found BLE devices: %d", foundDevices->getCount());
   sendLogToMaster(buf);
   
-  for (int i = 0; i < min((int)foundDevices.getCount(), 15); i++) {
+  for (int i = 0; i < min((int)foundDevices->getCount(), 15); i++) {
     yield();
-    BLEAdvertisedDevice device = foundDevices.getDevice(i);
+    BLEAdvertisedDevice device = foundDevices->getDevice(i);
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
     
@@ -705,6 +710,8 @@ void startBLEScan() {
     sendLogToMaster(structBuf);
     delay(50);
   }
+  pBLEScan->clearResults();
+  delete foundDevices;
 }
 
 void startBLESpoofer() {
@@ -953,6 +960,7 @@ void startIRScan() {
   bool captured = false;
   
   while (millis() - startTime < 6000) { // Scan for 6 seconds
+    esp_task_wdt_reset();
     if (digitalRead(IR_RX_PIN) == LOW) { // IR receiver output active-low
       unsigned long lowPulse = pulseIn(IR_RX_PIN, LOW, 15000);
       unsigned long highPulse = pulseIn(IR_RX_PIN, HIGH, 15000);
@@ -963,6 +971,7 @@ void startIRScan() {
         bool ok = true;
         
         for (int i = 0; i < 32; i++) {
+          esp_task_wdt_reset();
           unsigned long bitLow = pulseIn(IR_RX_PIN, LOW, 2000);
           unsigned long bitHigh = pulseIn(IR_RX_PIN, HIGH, 2000);
           
