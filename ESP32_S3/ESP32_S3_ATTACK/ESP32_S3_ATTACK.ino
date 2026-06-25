@@ -30,6 +30,7 @@ uint8_t masterMacAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 bool hasMasterMac = false;
 int lastStationCount = 0;
 bool evilTwinStarted = false;
+unsigned long lastMasterHeardTime = 0;
 
 // Channel, timing, and listening variables
 uint8_t currentChannel = 1;
@@ -118,7 +119,10 @@ void sendLogToMaster(const char* logMsg) {
   strncpy(response.logMsg, logMsg, sizeof(response.logMsg) - 1);
   response.logMsg[sizeof(response.logMsg) - 1] = '\0';
   
-  esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+  esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+  if (result != ESP_OK) {
+    Serial.printf("[ESP-NOW] Failed to send log to Master, err: %d\n", result);
+  }
 }
 
 // ===== LED STATUS BLINKER =====
@@ -1009,7 +1013,10 @@ void stopAttack() {
     strcpy(response.command, "stopped");
     strcpy(response.attack, "");
     strcpy(response.logMsg, "All attacks stopped. Standby mode.");
-    esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+    esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+    if (result != ESP_OK) {
+      Serial.printf("[ESP-NOW] Failed to send stopped confirmation, err: %d\n", result);
+    }
   }
   
   Serial.println("All attacks stopped");
@@ -1035,7 +1042,10 @@ void sendPong(const uint8_t *masterMac) {
   float sTemp = getBoardTemp();
   snprintf(response.logMsg, sizeof(response.logMsg), "%.1f", sTemp);
   
-  esp_now_send(masterMac, (uint8_t *)&response, sizeof(response));
+  esp_err_t result = esp_now_send(masterMac, (uint8_t *)&response, sizeof(response));
+  if (result != ESP_OK) {
+    Serial.printf("[ESP-NOW] Failed to send pong to Master, err: %d\n", result);
+  }
 }
 
 // ===== ESP-NOW HANDLER =====
@@ -1061,6 +1071,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     Serial.printf("Master MAC registered: %02X:%02X:%02X:%02X:%02X:%02X\n",
                   srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
   }
+
+  lastMasterHeardTime = millis();
 
   if (strcmp(myData.command, "ping") == 0) {
     Serial.println("Received PING, sending PONG...");
@@ -1113,6 +1125,7 @@ void setup() {
     return;
   }
   esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
+  lastMasterHeardTime = millis();
   Serial.println("SLAVE ready for commands");
   Serial.print("My MAC: ");
   Serial.println(WiFi.macAddress());
@@ -1121,6 +1134,12 @@ void setup() {
 // ===== LOOP =====
 void loop() {
   updateLedIndicator();
+  
+  // Safety timeout: stop attack if Master connection is lost for >15 seconds
+  if (attackRunning && hasMasterMac && (millis() - lastMasterHeardTime > 15000)) {
+    Serial.println("Master connection timeout. Stopping attack.");
+    stopAttack();
+  }
   
   if (attackRunning && currentAttack != "") {
     // Periodically return to Channel 1 to listen for Master command (stop/ping)
