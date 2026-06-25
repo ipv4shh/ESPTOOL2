@@ -8,6 +8,10 @@
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
+#include <SPI.h>
+
+#define CC1101_CS 10
+#define IR_RX_PIN 4
 
 // ===== LED SETTINGS =====
 #define LED_PIN 8 
@@ -626,6 +630,170 @@ void startProtokill() {
   sendLogToMaster("[Protokill] Starting 2.4GHz multi-protocol jammer using internal radio...");
   currentAttack = "powerful_jammer";
 }
+
+void writeReg(uint8_t reg, uint8_t val) {
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(reg);
+  SPI.transfer(val);
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+}
+
+uint8_t readReg(uint8_t reg) {
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(reg | 0x80);
+  uint8_t val = SPI.transfer(0);
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+  return val;
+}
+
+bool checkCC1101() {
+  pinMode(CC1101_CS, OUTPUT);
+  digitalWrite(CC1101_CS, HIGH);
+  
+  // SCK=12, MISO=13, MOSI=11, CS=10
+  SPI.begin(12, 13, 11, 10);
+  
+  uint8_t ver = readReg(0x31);
+  return (ver != 0x00 && ver != 0xFF);
+}
+
+void setCC1101_Frequency(float freq) {
+  uint32_t freq_reg = (uint32_t)((freq * 65536.0) / 26.0);
+  uint8_t freq2 = (freq_reg >> 16) & 0xFF;
+  uint8_t freq1 = (freq_reg >> 8) & 0xFF;
+  uint8_t freq0 = freq_reg & 0xFF;
+  
+  writeReg(0x0D, freq2);
+  writeReg(0x0E, freq1);
+  writeReg(0x0F, freq0);
+  
+  // SRX (0x34)
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(0x34);
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+}
+
+void setCC1101_Idle() {
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(0x36); // SIDLE
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+}
+
+int getCC1101_RSSI() {
+  uint8_t rssi_raw = readReg(0x34);
+  int rssi_dbm;
+  if (rssi_raw >= 128) {
+    rssi_dbm = (rssi_raw - 256) / 2 - 74;
+  } else {
+    rssi_dbm = rssi_raw / 2 - 74;
+  }
+  return rssi_dbm;
+}
+
+void startSubGhzScan() {
+  sendLogToMaster("[Sub-GHz Scanner] Checking CC1101 SPI connection...");
+  
+  bool hwPresent = checkCC1101();
+  if (!hwPresent) {
+    sendLogToMaster("[Sub-GHz Scanner] CC1101 not detected. Running demo scan...");
+    float frequencies[] = {315.00, 433.92, 868.35};
+    for (int i = 0; i < 3; i++) {
+      char buf[64];
+      int dummyRssi = random(-105, -95);
+      snprintf(buf, sizeof(buf), "[Sub-GHz] Freq %.2f MHz: RSSI %d dBm [CLEAN]", frequencies[i], dummyRssi);
+      sendLogToMaster(buf);
+      delay(500);
+    }
+    sendLogToMaster("[Sub-GHz Scanner] Demo scan finished.");
+    return;
+  }
+  
+  sendLogToMaster("[Sub-GHz Scanner] CC1101 detected! Scanning spectrum...");
+  float frequencies[] = {315.00, 433.92, 868.35};
+  
+  for (int i = 0; i < 3; i++) {
+    float freq = frequencies[i];
+    setCC1101_Frequency(freq);
+    delay(150);
+    
+    int rssi = getCC1101_RSSI();
+    char buf[64];
+    if (rssi > -75) {
+      snprintf(buf, sizeof(buf), "[Sub-GHz] Freq %.2f MHz: RSSI %d dBm [ACTIVE SIGNAL DETECTED!]", freq, rssi);
+    } else if (rssi > -90) {
+      snprintf(buf, sizeof(buf), "[Sub-GHz] Freq %.2f MHz: RSSI %d dBm [MODERATE NOISE]", freq, rssi);
+    } else {
+      snprintf(buf, sizeof(buf), "[Sub-GHz] Freq %.2f MHz: RSSI %d dBm [CLEAN]", freq, rssi);
+    }
+    sendLogToMaster(buf);
+    delay(500);
+  }
+  setCC1101_Idle();
+  sendLogToMaster("[Sub-GHz Scanner] Scan finished.");
+}
+
+void startIRScan() {
+  sendLogToMaster("[IR Scanner] Point remote at receiver and press a button...");
+  pinMode(IR_RX_PIN, INPUT);
+  
+  unsigned long startTime = millis();
+  bool captured = false;
+  
+  while (millis() - startTime < 6000) { // Scan for 6 seconds
+    if (digitalRead(IR_RX_PIN) == LOW) { // IR receiver output active-low
+      unsigned long lowPulse = pulseIn(IR_RX_PIN, LOW, 15000);
+      unsigned long highPulse = pulseIn(IR_RX_PIN, HIGH, 15000);
+      
+      if (lowPulse > 8000 && lowPulse < 10000 && highPulse > 4000 && highPulse < 5000) {
+        // Decode NEC 32 bits
+        uint32_t code = 0;
+        bool ok = true;
+        
+        for (int i = 0; i < 32; i++) {
+          unsigned long bitLow = pulseIn(IR_RX_PIN, LOW, 2000);
+          unsigned long bitHigh = pulseIn(IR_RX_PIN, HIGH, 2000);
+          
+          if (bitLow == 0 || bitHigh == 0) {
+            ok = false;
+            break;
+          }
+          
+          code <<= 1;
+          if (bitHigh > 1000) {
+            code |= 1;
+          }
+        }
+        
+        if (ok) {
+          char buf[64];
+          snprintf(buf, sizeof(buf), "[IR Scanner] Captured NEC Code: 0x%08X", code);
+          sendLogToMaster(buf);
+          captured = true;
+          break;
+        }
+      }
+      
+      delay(100);
+      sendLogToMaster("[IR Scanner] Captured RAW IR transmission!");
+      captured = true;
+      break;
+    }
+    delay(5);
+  }
+  
+  if (!captured) {
+    sendLogToMaster("[IR Scanner] Scan timeout. No signal detected.");
+  }
+}
+
 void startSubGhzReplay() { sendLogToMaster("[Error] Sub-GHz Replay requires CC1101"); }
 void startSubGhzJammer() { sendLogToMaster("[Error] Sub-GHz Jammer requires CC1101"); }
 void startIRReplay() { sendLogToMaster("[Error] IR Replay requires IR-led"); }
@@ -839,8 +1007,10 @@ void loop() {
     }
     else if (baseAttackName == "ghz_scan") { startGhzScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "protokill") { startProtokill(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "subghz_scan") { startSubGhzScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "subghz_replay") { startSubGhzReplay(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "subghz_jammer") { startSubGhzJammer(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "ir_scan") { startIRScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "ir_replay") { startIRReplay(); attackRunning = false; currentAttack = ""; }
   }
   delay(1);

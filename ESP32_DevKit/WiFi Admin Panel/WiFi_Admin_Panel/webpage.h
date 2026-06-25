@@ -387,6 +387,7 @@ const String webpage = R"rawliteral(
 
   <div id="tab-subghz" class="tab-content">
     <div class="grid">
+      <button class="attack-btn" data-attack="subghz_scan" onclick="selectAttack(this)"><span class="label">Sub-GHz Scanner</span></button>
       <button class="attack-btn" data-attack="subghz_replay" onclick="selectAttack(this)"><span class="label">Replay</span></button>
       <button class="attack-btn" data-attack="subghz_jammer" onclick="selectAttack(this)"><span class="label">Jammer</span></button>
     </div>
@@ -394,6 +395,7 @@ const String webpage = R"rawliteral(
 
   <div id="tab-ir" class="tab-content">
     <div class="grid">
+      <button class="attack-btn" data-attack="ir_scan" onclick="selectAttack(this)"><span class="label">IR Scanner</span></button>
       <button class="attack-btn" data-attack="ir_replay" onclick="selectAttack(this)"><span class="label">IR Replay</span></button>
     </div>
   </div>
@@ -437,10 +439,10 @@ const String webpage = R"rawliteral(
   let selectedAttack = 'beacon';
   let isBoostMode = false;
   const warnings = {
-    ghz_scan: 'External NRF24L01 radio module is required for 2.4GHz Scanner!',
-    protokill: 'External NRF24L01 radio module is required for Protokill!',
+    subghz_scan: 'External CC1101 module is required for hardware Sub-GHz scan!',
     subghz_replay: 'External CC1101 radio module is required for Sub-GHz Replay!',
     subghz_jammer: 'External CC1101 radio module is required for Sub-GHz Jammer!',
+    ir_scan: 'Connected Infrared Receiver (e.g. TSOP) is required for IR Scan!',
     ir_replay: 'Connected Infrared LED is required for IR Replay!'
   };
 
