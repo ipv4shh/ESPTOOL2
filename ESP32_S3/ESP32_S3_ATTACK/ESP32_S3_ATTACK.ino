@@ -10,6 +10,7 @@
 #include <BLEAdvertisedDevice.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 
 #define CC1101_CS 10
 #define IR_RX_PIN 4
@@ -124,8 +125,8 @@ void sendLogToMaster(const char* logMsg) {
   if (!hasMasterMac) return;
   
   struct_message response;
-  strcpy(response.command, "log");
-  strcpy(response.attack, "");
+  strlcpy(response.command, "log", sizeof(response.command));
+  strlcpy(response.attack, "", sizeof(response.attack));
   strncpy(response.logMsg, logMsg, sizeof(response.logMsg) - 1);
   response.logMsg[sizeof(response.logMsg) - 1] = '\0';
   
@@ -230,6 +231,7 @@ void runBeaconSpamStep(bool boost) {
       getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
       ssidIndex = (ssidIndex + 1) % 100;
+      esp_task_wdt_reset();
       yield();
     }
     
@@ -312,6 +314,7 @@ void runDeauthStep(bool boost) {
       
       clientPacket[0] = 0xA0;
       esp_wifi_80211_tx(WIFI_IF_STA, clientPacket, sizeof(clientPacket), false);
+      esp_task_wdt_reset();
       yield();
     }
     
@@ -492,7 +495,7 @@ void parseBeaconFrame(const uint8_t* payload, uint16_t len, int rssi) {
   int offset = 36;
   String ssid = "";
   bool hidden = true;
-  uint8_t channel = currentChannel;
+  uint8_t channel = 1;
   bool wpsEnabled = false;
   String security = "OPEN";
   
@@ -593,6 +596,7 @@ void startWiFiScan() {
     for (int step = 0; step < 20; step++) {
       if (!attackRunning) break;
       delay(10);
+      esp_task_wdt_reset();
       yield();
     }
     if (!attackRunning) break;
@@ -602,6 +606,7 @@ void startWiFiScan() {
     // Report APs found on this channel
     for (int i = 0; i < apCount; i++) {
       if (!attackRunning) break;
+      esp_task_wdt_reset();
       yield();
       if (apList[i].channel == ch) {
         char macStr[20];
@@ -680,15 +685,15 @@ void startBLEScan() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
-  BLEScanResults *foundDevices = pBLEScan->start(5, false);
+  BLEScanResults foundDevices = pBLEScan->start(5, false);
   
   char buf[64];
-  snprintf(buf, sizeof(buf), "[BLE] Found BLE devices: %d", foundDevices->getCount());
+  snprintf(buf, sizeof(buf), "[BLE] Found BLE devices: %d", foundDevices.getCount());
   sendLogToMaster(buf);
   
-  for (int i = 0; i < min((int)foundDevices->getCount(), 15); i++) {
+  for (int i = 0; i < min((int)foundDevices.getCount(), 15); i++) {
     yield();
-    BLEAdvertisedDevice device = foundDevices->getDevice(i);
+    BLEAdvertisedDevice device = foundDevices.getDevice(i);
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
     
@@ -700,7 +705,6 @@ void startBLEScan() {
     sendLogToMaster(structBuf);
     delay(50);
   }
-  pBLEScan->clearResults();
 }
 
 void startBLESpoofer() {
@@ -1057,7 +1061,9 @@ void sendPong(const uint8_t *masterMac) {
   peer.encrypt = false;
   
   if (!esp_now_is_peer_exist(masterMac)) {
-    esp_now_add_peer(&peer);
+    if (esp_now_add_peer(&peer) != ESP_OK) {
+      Serial.println("Failed to add peer");
+    }
   }
   
   struct_message response;
@@ -1090,7 +1096,9 @@ void registerMasterPeer(const uint8_t *mac) {
   if (esp_now_is_peer_exist(mac)) {
     esp_now_del_peer(mac);
   }
-  esp_now_add_peer(&peer);
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("Failed to add peer");
+  }
 }
 
 // ===== ESP-NOW HANDLER =====
@@ -1162,9 +1170,15 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
+  esp_task_wdt_init(15, true);
+  esp_task_wdt_add(NULL);
   
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+
+  pinMode(IR_RX_PIN, INPUT_PULLUP);
+  pinMode(CC1101_CS, OUTPUT);
+  digitalWrite(CC1101_CS, HIGH);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
@@ -1192,11 +1206,11 @@ void setup() {
     Serial.println("ESP-NOW init error");
     return;
   }
-  esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
+  esp_now_register_recv_cb(OnDataRecv);
   
   // Load paired Master MAC from Preferences
   Preferences prefs;
-  prefs.begin("esptool2", true);
+  prefs.begin("esptool2", false);
   if (prefs.getBool("hasMasterMac", false)) {
     prefs.getBytes("masterMac", masterMacAddress, 6);
     hasMasterMac = true;
@@ -1216,6 +1230,7 @@ void setup() {
 
 // ===== LOOP =====
 void loop() {
+  esp_task_wdt_reset();
   updateLedIndicator();
   
   // Safety timeout: stop attack if Master connection is lost for >15 seconds

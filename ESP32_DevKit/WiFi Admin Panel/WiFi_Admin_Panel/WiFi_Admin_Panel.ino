@@ -44,7 +44,7 @@ typedef struct struct_message {
   char logMsg[200]; // Increased to 200 bytes to prevent truncated device scan data (fits ESP-NOW limit)
 } struct_message;
 struct_message myData;
-struct_message stopData; // Defined globally to avoid conflict
+struct_message stopData = {0}; // Defined globally to avoid conflict
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
@@ -175,7 +175,7 @@ void setup() {
     return;
   }
   esp_now_register_send_cb(OnDataSent);
-  esp_now_register_recv_cb((esp_now_recv_cb_t)OnDataRecv);
+  esp_now_register_recv_cb(OnDataRecv);
   
   // Load paired Slave MAC from Preferences
   Preferences prefs;
@@ -194,7 +194,9 @@ void setup() {
   peerInfo.channel = 1;
   peerInfo.encrypt = false;
   peerInfo.ifidx = WIFI_IF_AP;
-  esp_now_add_peer(&peerInfo);
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+  }
 
   // Web routes
   server.on("/", []() {
