@@ -30,7 +30,7 @@ void XOR_crypt(uint8_t* data, size_t len) {
 typedef struct struct_message {
   char command[16];
   char attack[32];
-  char logMsg[200]; // Fits ESP-NOW payload limit (max 250 bytes)
+  char logMsg[180]; // Fits ESP-NOW payload limit (max 250 bytes)
 } struct_message;
 struct_message myData;
 
@@ -124,7 +124,7 @@ float getBoardTemp() {
 void sendLogToMaster(const char* logMsg) {
   if (!hasMasterMac) return;
   
-  struct_message response;
+  struct_message response = {};
   strlcpy(response.command, "log", sizeof(response.command));
   strlcpy(response.attack, "", sizeof(response.attack));
   strncpy(response.logMsg, logMsg, sizeof(response.logMsg) - 1);
@@ -586,6 +586,7 @@ void startWiFiScan() {
   
   // Hop through channels 1 to 13
   for (int ch = 1; ch <= 13; ch++) {
+    esp_task_wdt_reset();
     if (!attackRunning) break;
     currentChannel = ch;
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
@@ -688,7 +689,7 @@ void startBLEScan() {
   pBLEScan->setWindow(99);
   BLEScanResults *foundDevices = pBLEScan->start(5, false);
   if (!foundDevices) {
-    sendLogToMaster("BLE Scan failed!");
+    sendLogToMaster("[BLE] Scan failed!");
     return;
   }
   
@@ -1041,10 +1042,10 @@ void stopAttack() {
   
   // Send direct confirmation to Master
   if (hasMasterMac) {
-    struct_message response;
-    strcpy(response.command, "stopped");
-    strcpy(response.attack, "");
-    strcpy(response.logMsg, "All attacks stopped. Standby mode.");
+    struct_message response = {};
+    strlcpy(response.command, "stopped", sizeof(response.command));
+    strlcpy(response.attack, "", sizeof(response.attack));
+    strlcpy(response.logMsg, "All attacks stopped. Standby mode.", sizeof(response.logMsg));
     
     XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
     
@@ -1075,9 +1076,9 @@ void sendPong(const uint8_t *masterMac) {
     }
   }
   
-  struct_message response;
-  strcpy(response.command, "pong");
-  strcpy(response.attack, "");
+  struct_message response = {};
+  strlcpy(response.command, "pong", sizeof(response.command));
+  strlcpy(response.attack, "", sizeof(response.attack));
   
   // Read Slave Board temperature
   float sTemp = getBoardTemp();
@@ -1179,6 +1180,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
+  randomSeed(esp_random());
   esp_task_wdt_init(15, true);
   esp_task_wdt_add(NULL);
   
@@ -1306,7 +1308,7 @@ void loop() {
       runSourAppleStep(boost);
     }
     else if (baseAttackName == "ghz_scan") { startGhzScan(); attackRunning = false; currentAttack = ""; }
-    else if (baseAttackName == "protokill") { startProtokill(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "protokill") { currentAttack = "powerful_jammer"; attackRunning = true; }
     else if (baseAttackName == "subghz_scan") { startSubGhzScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "subghz_replay") { startSubGhzReplay(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "subghz_jammer") { startSubGhzJammer(); attackRunning = false; currentAttack = ""; }
