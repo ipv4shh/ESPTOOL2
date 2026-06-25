@@ -1176,10 +1176,6 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  pinMode(IR_RX_PIN, INPUT_PULLUP);
-  pinMode(CC1101_CS, OUTPUT);
-  digitalWrite(CC1101_CS, HIGH);
-
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect();
   WiFi.setSleep(false);
