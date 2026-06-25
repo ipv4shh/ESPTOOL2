@@ -124,7 +124,7 @@ float getBoardTemp() {
 void sendLogToMaster(const char* logMsg) {
   if (!hasMasterMac) return;
   
-  struct_message response = {};
+  struct_message response = 0;
   strlcpy(response.command, "log", sizeof(response.command));
   strlcpy(response.attack, "", sizeof(response.attack));
   strncpy(response.logMsg, logMsg, sizeof(response.logMsg) - 1);
@@ -1042,7 +1042,7 @@ void stopAttack() {
   
   // Send direct confirmation to Master
   if (hasMasterMac) {
-    struct_message response = {};
+    struct_message response = 0;
     strlcpy(response.command, "stopped", sizeof(response.command));
     strlcpy(response.attack, "", sizeof(response.attack));
     strlcpy(response.logMsg, "All attacks stopped. Standby mode.", sizeof(response.logMsg));
@@ -1076,7 +1076,7 @@ void sendPong(const uint8_t *masterMac) {
     }
   }
   
-  struct_message response = {};
+  struct_message response = 0;
   strlcpy(response.command, "pong", sizeof(response.command));
   strlcpy(response.attack, "", sizeof(response.attack));
   
