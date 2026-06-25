@@ -380,7 +380,7 @@ const String webpage = R"rawliteral(
 
   <div id="tab-ghz" class="tab-content">
     <div class="grid">
-      <button class="attack-btn" data-attack="ghz_scan" onclick="selectAttack(this)"><span class="label">2.4GHz Scanner</span></button>
+      <button class="attack-btn" data-attack="ghz_scan" onclick="selectAttack(this)"><span class="label">Spectrum Analyzer</span></button>
       <button class="attack-btn" data-attack="protokill" onclick="selectAttack(this)"><span class="label">Protokill</span></button>
     </div>
   </div>
@@ -463,6 +463,10 @@ const String webpage = R"rawliteral(
     selectedAttack = btn.dataset.attack;
     document.getElementById('status').innerHTML = 'TARGET: ' + btn.querySelector('.label').textContent.toUpperCase();
     
+    // Clear old layout containers
+    const dashBox = document.getElementById('dashboard-box');
+    dashBox.innerHTML = '';
+    
     if (warnings[selectedAttack]) {
       showModal(warnings[selectedAttack]);
     }
@@ -495,6 +499,9 @@ const String webpage = R"rawliteral(
   let wifiNetworks = [];
   let bleDevices = [];
   let evilTwinClients = [];
+  let subghzDevices = [];
+  let irDevices = [];
+  let nrfChannels = [];
   let isClearing = false;
 
   function parseLogs(text) {
@@ -502,6 +509,9 @@ const String webpage = R"rawliteral(
     let wifiTemp = [];
     let bleTemp = [];
     let evilTemp = [];
+    let subghzTemp = [];
+    let irTemp = [];
+    let nrfTemp = [...nrfChannels];
     
     lines.forEach(line => {
       if (line.includes('[WIFI_DEV]')) {
@@ -517,17 +527,23 @@ const String webpage = R"rawliteral(
       }
       else if (line.includes('[BLE_DEV]')) {
         const parts = line.split('[BLE_DEV]')[1].split('|');
-        if (parts.length >= 3) {
+        if (parts.length >= 6) {
           bleTemp.push({ 
             name: parts[0], 
             addr: parts[1], 
-            rssi: parseInt(parts[2]) 
+            rssi: parseInt(parts[2]),
+            type: parts[3],
+            percent: parts[4],
+            bar: parts[5]
           });
-        } else if (parts.length === 2) {
+        } else if (parts.length >= 3) {
           bleTemp.push({ 
             name: parts[0], 
-            addr: 'UNKNOWN', 
-            rssi: parseInt(parts[1]) 
+            addr: parts[1], 
+            rssi: parseInt(parts[2]),
+            type: 'Unknown',
+            percent: '50',
+            bar: 'IIIII.....'
           });
         }
       }
@@ -537,11 +553,46 @@ const String webpage = R"rawliteral(
           evilTemp.push(mac);
         }
       }
+      else if (line.includes('[SUBGHZ_DEV]')) {
+        const parts = line.split('[SUBGHZ_DEV]')[1].split('|');
+        if (parts.length >= 3) {
+          subghzTemp.push({ 
+            freq: parts[0], 
+            rssi: parts[1], 
+            mod: parts[2] 
+          });
+        }
+      }
+      else if (line.includes('[IR_DEV]')) {
+        const parts = line.split('[IR_DEV]')[1].split('|');
+        if (parts.length >= 4) {
+          irTemp.push({ 
+            proto: parts[0], 
+            addr: parts[1], 
+            cmd: parts[2],
+            len: parts[3]
+          });
+        }
+      }
+      else if (line.includes('[NRF_DEV]')) {
+        const parts = line.split('[NRF_DEV]')[1].split('|');
+        if (parts.length >= 3) {
+          const ch = parseInt(parts[0]);
+          nrfTemp[ch] = { 
+            ch: ch,
+            dbm: parts[1], 
+            graph: parts[2] 
+          };
+        }
+      }
     });
 
     wifiNetworks = wifiTemp;
     bleDevices = bleTemp;
     evilTwinClients = evilTemp;
+    subghzDevices = subghzTemp;
+    irDevices = irTemp;
+    nrfChannels = nrfTemp;
     
     updateDashboardUI();
   }
@@ -595,31 +646,37 @@ const String webpage = R"rawliteral(
     } 
     else if (selectedAttack === 'ble_scan') {
       dashTitle.innerHTML = 'BLE DEVICES DETECTED';
-      if (bleDevices.length === 0) {
-        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING BLE SCAN RESULTS...</div>';
+      
+      if (!document.getElementById('ble-filter-container')) {
+        dashBox.innerHTML = `
+          <div id="ble-filter-container" style="margin-bottom:8px;">
+            <input type="text" id="ble-filter" oninput="updateDashboardUI()" placeholder="Фильтр по имени..." style="width:100%; padding:8px; background:#020203; border:1px solid var(--border-color); color:var(--text-main); font-size:11px; border-radius:4px; outline:none;">
+          </div>
+          <div id="ble-table-container"></div>
+        `;
+      }
+      
+      const filterInput = document.getElementById('ble-filter');
+      const filter = filterInput ? filterInput.value.toLowerCase() : '';
+      const tableBox = document.getElementById('ble-table-container');
+      
+      const filtered = bleDevices.filter(dev => dev.name.toLowerCase().includes(filter));
+      
+      if (filtered.length === 0) {
+        tableBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">НЕТ УСТРОЙСТВ ПОДХОДЯЩИХ ПОД ФИЛЬТР</div>';
       } else {
-        let html = '<table class="scan-table"><thead><tr><th>DEVICE</th><th>MAC ADDRESS</th><th>SIGNAL</th><th>LEVEL</th></tr></thead><tbody>';
-        bleDevices.forEach(dev => {
-          let rssiClass = 'rssi-high';
-          let levelText = 'STRONG';
-          if (dev.rssi < -80) {
-            rssiClass = 'offline';
-            levelText = 'WEAK';
-          } else if (dev.rssi < -67) {
-            rssiClass = 'testing';
-            levelText = 'MEDIUM';
-          } else {
-            rssiClass = 'online';
-          }
+        let html = '<table class="scan-table"><thead><tr><th>DEVICE</th><th>TYPE</th><th>MAC ADDRESS</th><th>RSSI</th><th>LEVEL</th></tr></thead><tbody>';
+        filtered.forEach(dev => {
           html += '<tr>' +
                   '<td style="font-weight:600;color:#fff;">' + dev.name + '</td>' +
+                  '<td style="color:var(--primary-color); font-weight:bold; font-size:10px;">' + dev.type.toUpperCase() + '</td>' +
                   '<td style="color:var(--text-muted);">' + dev.addr + '</td>' +
-                  '<td>' + dev.rssi + ' dBm</td>' +
-                  '<td><span class="status-dot ' + rssiClass + '"></span> ' + levelText + '</td>' +
+                  '<td>' + dev.rssi + ' dBm (' + dev.percent + '%)</td>' +
+                  '<td style="font-family:\'JetBrains Mono\', monospace; color:#34d399;">[' + dev.bar + ']</td>' +
                   '</tr>';
         });
         html += '</tbody></table>';
-        dashBox.innerHTML = html;
+        tableBox.innerHTML = html;
       }
     }
     else if (selectedAttack === 'evil_twin') {
@@ -630,6 +687,56 @@ const String webpage = R"rawliteral(
         let html = '<div style="display:grid;grid-template-columns:1fr;gap:4px;">';
         evilTwinClients.forEach(client => {
           html += '<div class="client-card"><span class="client-mac">' + client + '</span><span class="client-status">CONNECTED</span></div>';
+        });
+        html += '</div>';
+        dashBox.innerHTML = html;
+      }
+    }
+    else if (selectedAttack === 'subghz_scan') {
+      dashTitle.innerHTML = 'SUB-GHZ SIGNALS DETECTED';
+      if (subghzDevices.length === 0) {
+        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING SUB-GHZ SCAN...</div>';
+      } else {
+        let html = '<table class="scan-table"><thead><tr><th>FREQUENCY</th><th>SIGNAL (RSSI)</th><th>MODULATION</th></tr></thead><tbody>';
+        subghzDevices.forEach(dev => {
+          html += '<tr>' +
+                  '<td style="font-weight:600;color:#fff;">' + dev.freq + '</td>' +
+                  '<td style="color:var(--primary-color); font-weight:bold;">' + dev.rssi + '</td>' +
+                  '<td style="color:#34d399;">' + dev.mod + '</td>' +
+                  '</tr>';
+        });
+        html += '</tbody></table>';
+        dashBox.innerHTML = html;
+      }
+    }
+    else if (selectedAttack === 'ir_scan') {
+      dashTitle.innerHTML = 'IR SIGNALS CAPTURED';
+      if (irDevices.length === 0) {
+        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING IR TRANSMISSION...</div>';
+      } else {
+        let html = '<table class="scan-table"><thead><tr><th>PROTOCOL</th><th>ADDRESS</th><th>COMMAND</th><th>LENGTH</th></tr></thead><tbody>';
+        irDevices.forEach(dev => {
+          html += '<tr>' +
+                  '<td style="font-weight:600;color:#fff;">' + dev.proto + '</td>' +
+                  '<td style="color:var(--primary-color); font-weight:bold;">' + dev.addr + '</td>' +
+                  '<td style="color:#34d399;">' + dev.cmd + '</td>' +
+                  '<td style="color:var(--text-muted);">' + dev.len + ' bits</td>' +
+                  '</tr>';
+        });
+        html += '</tbody></table>';
+        dashBox.innerHTML = html;
+      }
+    }
+    else if (selectedAttack === 'ghz_scan') {
+      dashTitle.innerHTML = 'NRF24L01 SPECTRUM ANALYZER';
+      if (nrfChannels.length === 0) {
+        dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING NRF24 SPECTRUM DATA...</div>';
+      } else {
+        let html = '<div style="max-height: 200px; overflow-y: auto; font-family:\'JetBrains Mono\', monospace; font-size: 10px; line-height:1.2; text-align: left; padding: 4px; border: 1px solid var(--border-color); background:#020203;">';
+        nrfChannels.forEach(c => {
+          if (c) {
+            html += `Ch ${c.ch.toString().padEnd(3)} | ${c.dbm.padEnd(8)} | <span style="color:var(--primary-color);">${c.graph}</span><br>`;
+          }
         });
         html += '</div>';
         dashBox.innerHTML = html;
