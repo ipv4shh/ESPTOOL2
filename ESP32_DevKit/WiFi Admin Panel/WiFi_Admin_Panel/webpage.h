@@ -423,7 +423,7 @@ const String webpage = R"rawliteral(
   </div>
   <div class="console-box" id="console-box">Awaiting connection...</div>
 
-  <div class="footer">ESPTOOL2 · <a href="#" onclick="location.reload()">Reload Console</a></div>
+  <div class="footer">ESPTOOL2 v1.1 · <a href="#" onclick="location.reload()">Reload Console</a></div>
 </div>
 
 <div id="modal-container" class="modal">

