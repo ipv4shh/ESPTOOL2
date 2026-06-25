@@ -818,6 +818,7 @@ void startGhzScan() {
   BLEScanResults *foundDevices = pBLEScan->start(2, false);
   int bleCount = foundDevices ? foundDevices->getCount() : 0;
   pBLEScan->clearResults();
+  delete foundDevices;
   
   // 3. Compile report
   sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
