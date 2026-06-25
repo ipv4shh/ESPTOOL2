@@ -389,44 +389,221 @@ void runPowerfulJammerStep() {
   }
 }
 
-void startWiFiScan() {
-  sendLogToMaster("[Scanner] Starting WiFi scan...");
-  Serial.println("WiFi Scan started");
-  int n = WiFi.scanNetworks();
-  if (n == 0) {
-    sendLogToMaster("[Scanner] No networks found");
-    Serial.println("No networks found");
-  } else {
-    scannedCount = min(n, MAX_SCANNED_NETWORKS);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[Scanner] Found WiFi networks: %d", n);
-    sendLogToMaster(buf);
-    
-    for (int i = 0; i < scannedCount; i++) {
-      memcpy(scannedBSSIDs[i], WiFi.BSSID(i), 6);
-      scannedChannels[i] = WiFi.channel(i);
-      
-      snprintf(buf, sizeof(buf), "  -> %s (%d dBm)", WiFi.SSID(i).c_str(), WiFi.RSSI(i));
-      sendLogToMaster(buf);
-      
-      String encType = "OPEN";
-      switch(WiFi.encryptionType(i)) {
-        case WIFI_AUTH_WPA_PSK: encType = "WPA"; break;
-        case WIFI_AUTH_WPA2_PSK: encType = "WPA2"; break;
-        case WIFI_AUTH_WPA_WPA2_PSK: encType = "WPA/WPA2"; break;
-        case WIFI_AUTH_WPA3_PSK: encType = "WPA3"; break;
-        case WIFI_AUTH_WEP: encType = "WEP"; break;
-        case WIFI_AUTH_OPEN: encType = "OPEN"; break;
-        default: encType = "WPA2"; break;
+// Wi-Fi Sniffer-based Scan Structs and variables
+struct APInfo {
+  char ssid[33];
+  uint8_t bssid[6];
+  int rssi;
+  uint8_t channel;
+  char security[12];
+  bool wps;
+};
+
+#define MAX_APS 40
+APInfo apList[MAX_APS];
+int apCount = 0;
+
+// Unique MACs collection for client counting
+#define MAX_UNIQUE_MACS 50
+uint8_t seenMacs[MAX_UNIQUE_MACS][6];
+int seenMacsCount = 0;
+
+void addSeenMac(const uint8_t* mac) {
+  if (mac[0] == 0xFF && mac[1] == 0xFF && mac[2] == 0xFF && mac[3] == 0xFF && mac[4] == 0xFF && mac[5] == 0xFF) return;
+  if ((mac[0] & 0x01) == 0x01) return; // Multicast
+  for (int i = 0; i < seenMacsCount; i++) {
+    if (memcmp(seenMacs[i], mac, 6) == 0) return;
+  }
+  if (seenMacsCount < MAX_UNIQUE_MACS) {
+    memcpy(seenMacs[seenMacsCount], mac, 6);
+    seenMacsCount++;
+  }
+}
+
+int countClientsForChannel(uint8_t ch) {
+  int clients = 0;
+  for (int i = 0; i < seenMacsCount; i++) {
+    bool isAp = false;
+    for (int j = 0; j < apCount; j++) {
+      if (memcmp(apList[j].bssid, seenMacs[i], 6) == 0) {
+        isAp = true;
+        break;
       }
-      
-      char structBuf[128];
-      snprintf(structBuf, sizeof(structBuf), "[WIFI_DEV]%s|%d|%s|%s", WiFi.SSID(i).c_str(), WiFi.RSSI(i), encType.c_str(), WiFi.BSSIDstr(i).c_str());
-      sendLogToMaster(structBuf);
-      delay(50);
+    }
+    if (!isAp) {
+      clients++;
     }
   }
-  WiFi.scanDelete();
+  return clients;
+}
+
+void addApToList(String ssid, const uint8_t* bssid, int rssi, uint8_t channel, String security, bool wps) {
+  for (int i = 0; i < apCount; i++) {
+    if (memcmp(apList[i].bssid, bssid, 6) == 0) {
+      apList[i].rssi = rssi;
+      if (ssid != "<hidden>" && String(apList[i].ssid) == "<hidden>") {
+        strncpy(apList[i].ssid, ssid.c_str(), 32);
+        apList[i].ssid[32] = '\0';
+      }
+      return;
+    }
+  }
+  if (apCount < MAX_APS) {
+    strncpy(apList[apCount].ssid, ssid.c_str(), 32);
+    apList[apCount].ssid[32] = '\0';
+    memcpy(apList[apCount].bssid, bssid, 6);
+    apList[apCount].rssi = rssi;
+    apList[apCount].channel = channel;
+    strncpy(apList[apCount].security, security.c_str(), 11);
+    apList[apCount].security[11] = '\0';
+    apList[apCount].wps = wps;
+    apCount++;
+  }
+}
+
+void parseBeaconFrame(const uint8_t* payload, uint16_t len, int rssi) {
+  if (len < 38) return;
+  
+  uint8_t frameType = payload[0];
+  if (frameType != 0x80 && frameType != 0x50) return; // Beacon or Probe Response
+  
+  const uint8_t* bssid = &payload[10];
+  int offset = 36;
+  String ssid = "";
+  bool hidden = true;
+  uint8_t channel = currentChannel;
+  bool wpsEnabled = false;
+  String security = "OPEN";
+  
+  uint16_t capability = (payload[35] << 8) | payload[34];
+  if (capability & 0x0010) {
+    security = "WEP";
+  }
+  
+  while (offset + 2 <= len) {
+    uint8_t ieId = payload[offset];
+    uint8_t ieLen = payload[offset + 1];
+    if (offset + 2 + ieLen > len) break;
+    
+    const uint8_t* ieVal = &payload[offset + 2];
+    
+    if (ieId == 0x00) { // SSID
+      if (ieLen > 0) {
+        char ssidBuf[33];
+        int sLen = min((int)ieLen, 32);
+        memcpy(ssidBuf, ieVal, sLen);
+        ssidBuf[sLen] = '\0';
+        ssid = String(ssidBuf);
+        hidden = false;
+        
+        bool allNulls = true;
+        for (int k = 0; k < sLen; k++) {
+          if (ssidBuf[k] != '\0') allNulls = false;
+        }
+        if (allNulls) {
+          ssid = "<hidden>";
+          hidden = true;
+        }
+      } else {
+        ssid = "<hidden>";
+        hidden = true;
+      }
+    }
+    else if (ieId == 0x03) { // Channel
+      if (ieLen == 1) {
+        channel = ieVal[0];
+      }
+    }
+    else if (ieId == 0x30) { // RSN
+      security = "WPA2";
+    }
+    else if (ieId == 0xDD) { // Vendor Specific
+      if (ieLen >= 4 && ieVal[0] == 0x00 && ieVal[1] == 0x50 && ieVal[2] == 0xF2) {
+        if (ieVal[3] == 0x01) {
+          if (security == "WEP" || security == "OPEN") {
+            security = "WPA";
+          }
+        }
+        else if (ieVal[3] == 0x04) {
+          wpsEnabled = true;
+        }
+      }
+    }
+    offset += 2 + ieLen;
+  }
+  
+  addApToList(ssid, bssid, rssi, channel, security, wpsEnabled);
+}
+
+void startWiFiScan() {
+  sendLogToMaster("[Scanner] Starting advanced Wi-Fi scan (hidden, WPS, client count)...");
+  Serial.println("Wi-Fi Advanced Sniffer Scan started");
+  
+  apCount = 0;
+  
+  // Register sniffer callback
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb([](void* buf, wifi_promiscuous_pkt_type_t type) {
+    wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    const uint8_t* payload = pkt->payload;
+    int rssi = pkt->rx_ctrl.rssi;
+    
+    if (len < 24) return;
+    
+    // Parse APs
+    parseBeaconFrame(payload, len, rssi);
+    
+    // Sniff MACs for client counting
+    addSeenMac(&payload[4]);
+    addSeenMac(&payload[10]);
+  });
+  
+  // Hop through channels 1 to 13
+  for (int ch = 1; ch <= 13; ch++) {
+    currentChannel = ch;
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    
+    seenMacsCount = 0;
+    memset(seenMacs, 0, sizeof(seenMacs));
+    
+    delay(200); // Sniff for 200ms on this channel
+    
+    int channelClients = countClientsForChannel(ch);
+    
+    // Report APs found on this channel
+    for (int i = 0; i < apCount; i++) {
+      if (apList[i].channel == ch) {
+        char macStr[20];
+        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 apList[i].bssid[0], apList[i].bssid[1], apList[i].bssid[2],
+                 apList[i].bssid[3], apList[i].bssid[4], apList[i].bssid[5]);
+        
+        char structBuf[160];
+        // Format: [WIFI_DEV]SSID|RSSI|Security|BSSID|WPS|ClientsCount|Channel
+        snprintf(structBuf, sizeof(structBuf), "[WIFI_DEV]%s|%d|%s|%s|%s|%d|%d",
+                 apList[i].ssid, apList[i].rssi, apList[i].security, macStr,
+                 apList[i].wps ? "WPS_ENABLED" : "WPS_DISABLED",
+                 channelClients, ch);
+        
+        sendLogToMaster(structBuf);
+        delay(20);
+      }
+    }
+  }
+  
+  // Unregister sniffer
+  esp_wifi_set_promiscuous(false);
+  
+  // Update scanner memory for deauth targeting using scanned APs
+  scannedCount = min(apCount, MAX_SCANNED_NETWORKS);
+  for (int i = 0; i < scannedCount; i++) {
+    memcpy(scannedBSSIDs[i], apList[i].bssid, 6);
+    scannedChannels[i] = apList[i].channel;
+  }
+  
+  sendLogToMaster("[Scanner] Advanced Wi-Fi scan finished.");
+  Serial.println("Wi-Fi Scan finished");
 }
 
 void startEvilTwin() {

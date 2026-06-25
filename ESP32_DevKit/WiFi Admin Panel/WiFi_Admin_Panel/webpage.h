@@ -516,12 +516,25 @@ const String webpage = R"rawliteral(
     lines.forEach(line => {
       if (line.includes('[WIFI_DEV]')) {
         const parts = line.split('[WIFI_DEV]')[1].split('|');
-        if (parts.length >= 2) {
+        if (parts.length >= 7) {
           wifiTemp.push({ 
             ssid: parts[0], 
             rssi: parseInt(parts[1]), 
-            enc: parts[2] || 'OPEN', 
-            bssid: parts[3] || 'UNKNOWN' 
+            enc: parts[2], 
+            bssid: parts[3],
+            wps: parts[4],
+            clients: parseInt(parts[5]),
+            channel: parseInt(parts[6])
+          });
+        } else if (parts.length >= 4) {
+          wifiTemp.push({ 
+            ssid: parts[0], 
+            rssi: parseInt(parts[1]), 
+            enc: parts[2], 
+            bssid: parts[3],
+            wps: 'WPS_DISABLED',
+            clients: 0,
+            channel: 1
           });
         }
       }
@@ -614,30 +627,23 @@ const String webpage = R"rawliteral(
       if (wifiNetworks.length === 0) {
         dashBox.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">AWAITING WIFI SCAN RESULTS...</div>';
       } else {
-        let html = '<table class="scan-table"><thead><tr><th>SSID</th><th>BSSID</th><th>SIGNAL</th><th>SECURITY</th><th>LEVEL</th></tr></thead><tbody>';
+        let html = '<table class="scan-table"><thead><tr><th>SSID</th><th>CH</th><th>BSSID</th><th>RSSI</th><th>SECURITY</th><th>WPS</th><th>CLIENTS</th></tr></thead><tbody>';
         wifiNetworks.forEach(net => {
-          let rssiClass = 'rssi-high';
-          let levelText = 'STRONG';
-          if (net.rssi < -80) {
-            rssiClass = 'offline';
-            levelText = 'WEAK';
-          } else if (net.rssi < -67) {
-            rssiClass = 'testing';
-            levelText = 'MEDIUM';
-          } else {
-            rssiClass = 'online';
-          }
-          
           let secRating = 'SECURE';
           if (net.enc === 'OPEN') secRating = 'VULNERABLE';
           else if (net.enc === 'WEP') secRating = 'WEAK';
           
+          let wpsColor = net.wps === 'WPS_ENABLED' ? '#10b981' : 'var(--text-muted)';
+          let wpsLabel = net.wps === 'WPS_ENABLED' ? 'YES' : 'NO';
+          
           html += '<tr>' +
                   '<td style="font-weight:600;color:#fff;">' + net.ssid + '</td>' +
+                  '<td style="color:#34d399;">' + net.channel + '</td>' +
                   '<td style="color:var(--text-muted);">' + net.bssid + '</td>' +
                   '<td>' + net.rssi + ' dBm</td>' +
-                  '<td><span style="color:' + (secRating === 'VULNERABLE' ? 'var(--primary-color)' : 'var(--text-muted)') + ';">' + net.enc + ' (' + secRating + ')</span></td>' +
-                  '<td><span class="status-dot ' + rssiClass + '"></span> ' + levelText + '</td>' +
+                  '<td><span style="color:' + (secRating === 'VULNERABLE' ? 'var(--primary-color)' : 'var(--text-muted)') + ';">' + net.enc + '</span></td>' +
+                  '<td style="color:' + wpsColor + '; font-weight:bold;">' + wpsLabel + '</td>' +
+                  '<td style="text-align:center; font-weight:bold; color:#fca5a5;">' + net.clients + '</td>' +
                   '</tr>';
         });
         html += '</tbody></table>';
