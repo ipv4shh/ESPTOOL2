@@ -45,7 +45,7 @@ typedef struct struct_message {
   char logMsg[180]; // Increased to 200 bytes to prevent truncated device scan data (fits ESP-NOW limit)
 } struct_message;
 struct_message myData;
-struct_message stopData = {}; // Defined globally to avoid conflict
+struct_message stopData = 0; // Defined globally to avoid conflict
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
@@ -113,7 +113,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     XOR_crypt((uint8_t*)&incoming, sizeof(incoming)); // Decrypt
     incoming.command[15] = '\0';
     incoming.attack[31] = '\0';
-    incoming.logMsg[199] = '\0';
+    incoming.logMsg[sizeof(incoming.logMsg)-1] = '\0';
     
     // Auto-pairing: switch to Unicast on first received packet from Slave
     if (!slavePaired || memcmp(slaveMac, srcMac, 6) != 0) {
