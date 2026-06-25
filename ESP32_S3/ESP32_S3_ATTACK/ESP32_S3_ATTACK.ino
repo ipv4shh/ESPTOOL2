@@ -1182,7 +1182,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 void setup() {
   Serial.begin(115200);
   randomSeed(esp_random());
-  esp_task_wdt_init(15, true);
+  esp_task_wdt_config_t wdt_config = { .timeout_ms = 15000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
+  esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
   
   pinMode(LED_PIN, OUTPUT);
