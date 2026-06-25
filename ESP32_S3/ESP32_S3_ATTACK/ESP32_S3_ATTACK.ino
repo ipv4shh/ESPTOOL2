@@ -11,6 +11,7 @@
 #include <SPI.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <string>
 
 #define CC1101_CS 10
 #define IR_RX_PIN 4
