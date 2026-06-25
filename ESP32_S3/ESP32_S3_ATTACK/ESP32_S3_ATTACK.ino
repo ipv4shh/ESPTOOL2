@@ -772,8 +772,7 @@ void runSourAppleStep(bool boost) {
 
     const uint8_t *payload = blePayloads[blePayloadIndex];
     uint8_t len = payload[0];
-    std::string manufDataStr((char*)&payload[1], len);
-    advData.setManufacturerData(manufDataStr);
+    advData.setManufacturerData((uint8_t*)&payload[1], len);
 
     pAdvertising->setAdvertisementData(advData);
     pAdvertising->start();
