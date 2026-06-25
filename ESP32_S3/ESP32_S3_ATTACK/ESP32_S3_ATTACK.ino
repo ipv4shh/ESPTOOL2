@@ -94,6 +94,7 @@ const int numPrefixes = sizeof(routerPrefixes) / sizeof(routerPrefixes[0]);
 
 // Generate highly realistic SSID names on the fly
 void getRealisticSSID(char* outBuf, int index) {
+  if (index < 0) index = 0;
   const char* prefix = routerPrefixes[index % numPrefixes];
   int suffix = (index * 17) % 9000 + 1000;
   
@@ -749,7 +750,9 @@ void runSourAppleStep(bool boost) {
     lastAppleSpamTime = millis();
     
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->stop();
+    if (pAdvertising) {
+      pAdvertising->stop();
+    }
 
     BLEAdvertisementData advData;
     advData.setFlags(0x04);
@@ -781,7 +784,9 @@ void startGhzScan() {
   int channelCount[14] = {0};
   int channelRssiSum[14] = {0};
   
-  if (n > 0) {
+  if (n == WIFI_SCAN_FAILED) {
+    sendLogToMaster("[2.4GHz Scanner] WiFi scan failed!");
+  } else if (n > 0) {
     for (int i = 0; i < n; i++) {
       yield();
       int ch = WiFi.channel(i);
@@ -852,9 +857,6 @@ uint8_t readReg(uint8_t reg) {
 bool checkCC1101() {
   pinMode(CC1101_CS, OUTPUT);
   digitalWrite(CC1101_CS, HIGH);
-  
-  // SCK=12, MISO=13, MOSI=11, CS=10
-  SPI.begin(12, 13, 11, 10);
   
   uint8_t ver = readReg(0x31);
   return (ver != 0x00 && ver != 0xFF);
@@ -1175,6 +1177,9 @@ void setup() {
 
   // Initialize BLE stack once
   BLEDevice::init("ESP32-S3");
+
+  // SCK=12, MISO=13, MOSI=11, CS=10
+  SPI.begin(12, 13, 11, 10);
 
   // Check CC1101 connection
   if (checkCC1101()) {
