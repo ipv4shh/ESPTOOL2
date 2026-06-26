@@ -33,7 +33,7 @@ unsigned long lastStopSendTime = 0;
 int stopSendCount = 0;
 
 // Circular Log Buffer
-#define MAX_LOG_MESSAGES 60
+#define MAX_LOG_MESSAGES 200
 String logBuffer[MAX_LOG_MESSAGES];
 int logHead = 0;
 int logCount = 0;
