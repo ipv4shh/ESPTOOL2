@@ -37,6 +37,7 @@ int stopSendCount = 0;
 String logBuffer[MAX_LOG_MESSAGES];
 int logHead = 0;
 int logCount = 0;
+portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ===== ESP-NOW STRUCTURE =====
 typedef struct struct_message {
@@ -49,32 +50,36 @@ struct_message stopData = {0}; // Defined globally to avoid conflict
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
-  esp_task_wdt_reset();
+  portENTER_CRITICAL(&logMux);
   String timeStr = "[" + String(millis() / 1000) + "s] ";
   logBuffer[logHead] = timeStr + logMsg;
   logHead = (logHead + 1) % MAX_LOG_MESSAGES;
   if (logCount < MAX_LOG_MESSAGES) {
     logCount++;
   }
+  portEXIT_CRITICAL(&logMux);
 }
 
 String getLogs() {
+  portENTER_CRITICAL(&logMux);
   String allLogs = "";
   int startIndex = (logCount == MAX_LOG_MESSAGES) ? logHead : 0;
   for (int i = 0; i < logCount; i++) {
     int index = (startIndex + i) % MAX_LOG_MESSAGES;
     allLogs += logBuffer[index] + "\n";
   }
+  portEXIT_CRITICAL(&logMux);
   return allLogs;
 }
 
 void clearLogs() {
-  esp_task_wdt_reset();
+  portENTER_CRITICAL(&logMux);
   logHead = 0;
   logCount = 0;
   for (int i = 0; i < MAX_LOG_MESSAGES; i++) {
     logBuffer[i] = "";
   }
+  portEXIT_CRITICAL(&logMux);
 }
 
 // Get board internal temperature safely
@@ -164,8 +169,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 
 void setup() {
   Serial.begin(115200);
-  esp_task_wdt_config_t wdt_config = { .timeout_ms = 15000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
+  // WDT 30 секунд — перезагрузка при зависании
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdt_config = { .timeout_ms = 30000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
+#else
+  esp_task_wdt_init(30, true);
+#endif
   esp_task_wdt_add(NULL);
   
   // Access Point on Channel 1
@@ -292,11 +302,12 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  esp_task_wdt_reset();
   
   if (isStopping) {
-    esp_task_wdt_reset();
     if (millis() - lastStopSendTime >= 80) {
       lastStopSendTime = millis();
+      esp_task_wdt_reset();
       struct_message encryptedStopData = stopData;
       XOR_crypt((uint8_t*)&encryptedStopData, sizeof(encryptedStopData));
       esp_err_t result = esp_now_send(slaveMac, (uint8_t *)&encryptedStopData, sizeof(encryptedStopData));

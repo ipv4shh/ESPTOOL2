@@ -400,9 +400,13 @@ const String webpage = R"rawliteral(
     </div>
   </div>
 
-  <div style="display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 12px; font-size: 11px; padding-left: 2px;">
+  <div style="display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 4px; font-size: 11px; padding-left: 2px;">
     <input type="checkbox" id="boost-mode" onchange="toggleBoostMode(this)" style="accent-color: var(--primary-color);">
     <label for="boost-mode" style="cursor: pointer; color: var(--text-muted);">Enable Boost Mode (Extreme Transmission)</label>
+  </div>
+  <div style="display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 12px; font-size: 11px; padding-left: 2px;">
+    <input type="checkbox" id="extreme-mode" onchange="toggleExtremeMode(this)" style="accent-color: #ef4444;">
+    <label for="extreme-mode" style="cursor: pointer; color: #ef4444; font-weight: 700;">⚠ EXTREME</label>
   </div>
 
   <div class="action-row">
@@ -438,6 +442,7 @@ const String webpage = R"rawliteral(
 <script>
   let selectedAttack = 'beacon';
   let isBoostMode = false;
+  let isExtremeMode = false;
   const warnings = {
     subghz_scan: 'External CC1101 module is required for hardware Sub-GHz scan!',
     subghz_replay: 'External CC1101 radio module is required for Sub-GHz Replay!',
@@ -484,6 +489,22 @@ const String webpage = R"rawliteral(
       }
     } else {
       isBoostMode = false;
+    }
+  }
+
+  function toggleExtremeMode(checkbox) {
+    if (checkbox.checked) {
+      if (confirm("⚠ EXTREME MODE: Maximum packet rate, minimal delays. High risk of overheating and crash. Are you sure?")) {
+        isExtremeMode = true;
+        // Extreme implies boost
+        document.getElementById('boost-mode').checked = true;
+        isBoostMode = true;
+      } else {
+        checkbox.checked = false;
+        isExtremeMode = false;
+      }
+    } else {
+      isExtremeMode = false;
     }
   }
 
@@ -761,7 +782,9 @@ const String webpage = R"rawliteral(
     status.innerHTML = 'PENDING: SENDING COMMAND TO SLAVE...';
     
     let attackParam = selectedAttack;
-    if (cmd === 'start' && isBoostMode) {
+    if (cmd === 'start' && isExtremeMode) {
+      attackParam = selectedAttack + '_extreme';
+    } else if (cmd === 'start' && isBoostMode) {
       attackParam = selectedAttack + '_boost';
     }
     
