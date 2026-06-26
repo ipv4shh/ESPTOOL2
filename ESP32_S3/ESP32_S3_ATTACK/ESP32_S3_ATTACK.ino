@@ -772,7 +772,7 @@ void runSourAppleStep(bool boost) {
 
     const uint8_t *payload = blePayloads[blePayloadIndex];
     uint8_t len = payload[0];
-    advData.setManufacturerData((const uint8_t*)&payload[1], (size_t)len);
+    advData.setManufacturerData((const uint8_t*)&payload[1], (uint8_t)len);
 
     pAdvertising->setAdvertisementData(advData);
     pAdvertising->start();
