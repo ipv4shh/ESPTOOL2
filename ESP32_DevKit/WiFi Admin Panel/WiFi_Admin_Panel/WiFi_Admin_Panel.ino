@@ -21,7 +21,7 @@ const char* ap_ssid = "ESP-Admin";
 const char* ap_password = "Esp_div_admin";
 WebServer server(80);
 
-// SLAVE MAC Address (Broadcast FF:FF:FF:FF:FF:FF for auto-pairing initially)
+// SLAVE MAC Address
 uint8_t slaveMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 bool slavePaired = false;
 unsigned long lastPongTime = 0;
@@ -43,10 +43,10 @@ portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 typedef struct struct_message {
   char command[16];
   char attack[32];
-  char logMsg[180]; // Increased to 200 bytes to prevent truncated device scan data (fits ESP-NOW limit)
+  char logMsg[180];
 } struct_message;
 struct_message myData;
-struct_message stopData = {0}; // Defined globally to avoid conflict
+struct_message stopData = {0};
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
@@ -54,9 +54,7 @@ void addLog(const String& logMsg) {
   String timeStr = "[" + String(millis() / 1000) + "s] ";
   logBuffer[logHead] = timeStr + logMsg;
   logHead = (logHead + 1) % MAX_LOG_MESSAGES;
-  if (logCount < MAX_LOG_MESSAGES) {
-    logCount++;
-  }
+  if (logCount < MAX_LOG_MESSAGES) logCount++;
   portEXIT_CRITICAL(&logMux);
 }
 
@@ -76,22 +74,44 @@ void clearLogs() {
   portENTER_CRITICAL(&logMux);
   logHead = 0;
   logCount = 0;
-  for (int i = 0; i < MAX_LOG_MESSAGES; i++) {
-    logBuffer[i] = "";
-  }
+  for (int i = 0; i < MAX_LOG_MESSAGES; i++) logBuffer[i] = "";
   portEXIT_CRITICAL(&logMux);
 }
 
-// Get board internal temperature safely
 float getBoardTemp() {
   float t = 0.0;
   #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 2
   t = temperatureRead();
   #endif
-  if (isnan(t) || t < -50 || t > 150) {
-    t = 43.5; // realistic fallback temperature in Celsius
-  }
+  if (isnan(t) || t < -50 || t > 150) t = 43.5;
   return t;
+}
+
+// ===== SIMPLE JSON EXTRACTOR =====
+String jsonExtract(const String& json, const String& key) {
+  String search = "\"" + key + "\"";
+  int idx = json.indexOf(search);
+  if (idx < 0) return "";
+  idx = json.indexOf(':', idx);
+  if (idx < 0) return "";
+  idx++;
+  while (idx < (int)json.length() && (json[idx] == ' ' || json[idx] == '\t')) idx++;
+  if (idx >= (int)json.length()) return "";
+  if (json[idx] == '"') {
+    int end = json.indexOf('"', idx + 1);
+    if (end < 0) return "";
+    return json.substring(idx + 1, end);
+  }
+  int end = idx;
+  while (end < (int)json.length() && json[end] != ',' && json[end] != '}' && json[end] != ' ') end++;
+  return json.substring(idx, end);
+}
+
+// ===== HELPER: Send ESP-NOW message =====
+void sendToSlave(struct_message& msg) {
+  struct_message encrypted = msg;
+  XOR_crypt((uint8_t*)&encrypted, sizeof(encrypted));
+  esp_now_send(slaveMac, (uint8_t*)&encrypted, sizeof(encrypted));
 }
 
 // ===== ESP-NOW SEND CALLBACK =====
@@ -112,36 +132,28 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, in
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = mac_addr;
 #endif
-  if (len >= sizeof(myData)) {
+  if (len >= (int)sizeof(myData)) {
     struct_message incoming;
     memcpy(&incoming, incomingData, sizeof(incoming));
-    XOR_crypt((uint8_t*)&incoming, sizeof(incoming)); // Decrypt
+    XOR_crypt((uint8_t*)&incoming, sizeof(incoming));
     incoming.command[15] = '\0';
     incoming.attack[31] = '\0';
     incoming.logMsg[sizeof(incoming.logMsg)-1] = '\0';
     
-    // Auto-pairing: switch to Unicast on first received packet from Slave
+    // Auto-pairing
     if (!slavePaired || memcmp(slaveMac, srcMac, 6) != 0) {
       Serial.printf("Slave MAC detected: %02X:%02X:%02X:%02X:%02X:%02X\n", 
                     srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
-      
-      // Delete old peer
       esp_now_del_peer(slaveMac);
-      
-      // Store new MAC
       memcpy(slaveMac, srcMac, 6);
-      
       memset(&peerInfo, 0, sizeof(peerInfo));
       memcpy(peerInfo.peer_addr, slaveMac, 6);
       peerInfo.channel = 1;
       peerInfo.encrypt = false;
       peerInfo.ifidx = WIFI_IF_AP;
-      
       if (esp_now_add_peer(&peerInfo) == ESP_OK) {
         slavePaired = true;
         Serial.println("Switched to Unicast with ACK confirmation!");
-        
-        // Save to Preferences
         Preferences prefs;
         prefs.begin("esptool2", false);
         prefs.putBytes("slaveMac", slaveMac, 6);
@@ -169,7 +181,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 
 void setup() {
   Serial.begin(115200);
-  // WDT 30 секунд — перезагрузка при зависании
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   esp_task_wdt_config_t wdt_config = { .timeout_ms = 30000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
@@ -178,14 +189,12 @@ void setup() {
 #endif
   esp_task_wdt_add(NULL);
   
-  // Access Point on Channel 1
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password, 1);
   WiFi.setSleep(false);
   Serial.print("IP: ");
   Serial.println(WiFi.softAPIP());
 
-  // Init ESP-NOW
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW Init Error");
     return;
@@ -193,7 +202,7 @@ void setup() {
   esp_now_register_send_cb(OnDataSent);
   esp_now_register_recv_cb(OnDataRecv);
   
-  // Load paired Slave MAC from Preferences
+  // Load paired Slave MAC
   Preferences prefs;
   prefs.begin("esptool2", false);
   if (prefs.getBool("slavePaired", false)) {
@@ -204,15 +213,14 @@ void setup() {
   }
   prefs.end();
 
-  // Add peer
   memset(&peerInfo, 0, sizeof(peerInfo));
   memcpy(peerInfo.peer_addr, slaveMac, 6);
   peerInfo.channel = 1;
   peerInfo.encrypt = false;
   peerInfo.ifidx = WIFI_IF_AP;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK)  Serial.println("Failed to add peer");
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) Serial.println("Failed to add peer");
 
-  // Web routes
+  // ===== WEB ROUTES =====
   server.on("/", []() {
     server.send(200, "text/html", webpage);
   });
@@ -262,7 +270,6 @@ void setup() {
     
     String response = "";
     
-    // For stop command: trigger background send loop
     if (cmd == "stop") {
       isStopping = true;
       stopSendCount = 0;
@@ -272,16 +279,10 @@ void setup() {
       strncpy(stopData.attack, attack.c_str(), sizeof(stopData.attack) - 1);
       stopData.attack[sizeof(stopData.attack) - 1] = '\0';
       memset(stopData.logMsg, 0, sizeof(stopData.logMsg));
-      
       response = "Attack " + attack + " stopping...";
       addLog("STOP command triggered");
     } else {
-      struct_message encryptedMyData = myData;
-      XOR_crypt((uint8_t*)&encryptedMyData, sizeof(encryptedMyData));
-      unsigned long start = millis();
-      while (millis() - start < 100)  delay(1);
-      esp_err_t result = esp_now_send(slaveMac, (uint8_t *)&encryptedMyData, sizeof(encryptedMyData));
-      if (result != ESP_OK)  addLog("ESP-NOW send failed: " + String(result));
+      sendToSlave(myData);
       response = "Command: " + cmd + " | Target: " + attack;
       if (cmd == "start") {
         response = "Attack " + attack + " started!";
@@ -294,6 +295,77 @@ void setup() {
     server.sendHeader("Pragma", "no-cache");
     server.sendHeader("Expires", "-1");
     server.send(200, "text/plain", response);
+  });
+
+  // ===== NEW v1.2 ROUTES =====
+
+  // POST /select_target — send target info to Slave
+  server.on("/select_target", HTTP_POST, []() {
+    if (!server.hasArg("plain")) { server.send(400, "text/plain", "No body"); return; }
+    String body = server.arg("plain");
+    String type = jsonExtract(body, "type");
+    struct_message msg = {0};
+    strlcpy(msg.command, "select_target", sizeof(msg.command));
+    strlcpy(msg.attack, type.c_str(), sizeof(msg.attack));
+    String packed = "";
+    if (type == "wifi") {
+      packed = jsonExtract(body,"ssid") + "|" + jsonExtract(body,"bssid") + "|" + jsonExtract(body,"rssi") + "|" + jsonExtract(body,"channel") + "|" + jsonExtract(body,"security") + "|" + jsonExtract(body,"wps");
+    } else if (type == "ble") {
+      packed = jsonExtract(body,"name") + "|" + jsonExtract(body,"addr") + "|" + jsonExtract(body,"rssi");
+    } else if (type == "subghz") {
+      packed = jsonExtract(body,"freq") + "|" + jsonExtract(body,"rssi") + "|" + jsonExtract(body,"mod");
+    } else if (type == "ir") {
+      packed = jsonExtract(body,"proto") + "|" + jsonExtract(body,"addr") + "|" + jsonExtract(body,"cmd") + "|" + jsonExtract(body,"len");
+    }
+    strlcpy(msg.logMsg, packed.c_str(), sizeof(msg.logMsg));
+    sendToSlave(msg);
+    addLog("Target selected: " + type + " -> " + packed);
+    server.send(200, "text/plain", "Target selected: " + type);
+  });
+
+  // GET /clear_target — clear target on Slave
+  server.on("/clear_target", []() {
+    struct_message msg = {0};
+    strlcpy(msg.command, "clear_target", sizeof(msg.command));
+    sendToSlave(msg);
+    addLog("Target cleared");
+    server.send(200, "text/plain", "Target cleared");
+  });
+
+  // POST /multi_attack — send multi-attack command to Slave
+  server.on("/multi_attack", HTTP_POST, []() {
+    if (!server.hasArg("plain")) { server.send(400, "text/plain", "No body"); return; }
+    String body = server.arg("plain");
+    int arrStart = body.indexOf('[');
+    int arrEnd = body.indexOf(']');
+    String attacksList = "";
+    if (arrStart >= 0 && arrEnd > arrStart) {
+      String arr = body.substring(arrStart + 1, arrEnd);
+      arr.replace("\"", "");
+      arr.replace(" ", "");
+      attacksList = arr;
+    }
+    String mode = jsonExtract(body, "mode");
+    struct_message msg = {0};
+    strlcpy(msg.command, "multi_attack", sizeof(msg.command));
+    strlcpy(msg.attack, attacksList.c_str(), sizeof(msg.attack));
+    strlcpy(msg.logMsg, mode.c_str(), sizeof(msg.logMsg));
+    sendToSlave(msg);
+    addLog("Multi-attack: " + attacksList + " [" + mode + "]");
+    server.send(200, "text/plain", "Multi-attack started: " + attacksList);
+  });
+
+  // GET /stop_all — stop all attacks on Slave
+  server.on("/stop_all", []() {
+    isStopping = true;
+    stopSendCount = 0;
+    lastStopSendTime = 0;
+    strlcpy(stopData.command, "stop", sizeof(stopData.command));
+    memset(stopData.attack, 0, sizeof(stopData.attack));
+    memset(stopData.logMsg, 0, sizeof(stopData.logMsg));
+    addLog("STOP ALL triggered");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.send(200, "text/plain", "Stopping all attacks...");
   });
 
   server.begin();
@@ -311,9 +383,9 @@ void loop() {
       struct_message encryptedStopData = stopData;
       XOR_crypt((uint8_t*)&encryptedStopData, sizeof(encryptedStopData));
       esp_err_t result = esp_now_send(slaveMac, (uint8_t *)&encryptedStopData, sizeof(encryptedStopData));
-      if (result != ESP_OK)  addLog("ESP-NOW stop send failed: " + String(result));
+      if (result != ESP_OK) addLog("ESP-NOW stop send failed: " + String(result));
       stopSendCount++;
-      if (stopSendCount >= 25) { // Try up to 25 times (2 seconds)
+      if (stopSendCount >= 25) {
         isStopping = false;
         addLog("Stop timeout reached (Slave did not acknowledge)");
         Serial.println("Finished sending stop commands (timeout)");
