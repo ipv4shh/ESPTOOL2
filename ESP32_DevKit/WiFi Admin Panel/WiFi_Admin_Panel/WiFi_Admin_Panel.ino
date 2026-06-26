@@ -107,7 +107,7 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, in
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = mac_addr;
 #endif
-  if (len == sizeof(myData)) {
+  if (len >= sizeof(myData)) {
     struct_message incoming;
     memcpy(&incoming, incomingData, sizeof(incoming));
     XOR_crypt((uint8_t*)&incoming, sizeof(incoming)); // Decrypt
@@ -268,7 +268,10 @@ void setup() {
     } else {
       struct_message encryptedMyData = myData;
       XOR_crypt((uint8_t*)&encryptedMyData, sizeof(encryptedMyData));
-      esp_now_send(slaveMac, (uint8_t *) &encryptedMyData, sizeof(encryptedMyData));
+      unsigned long start = millis();
+      while (millis() - start < 100)  delay(1);
+      esp_err_t result = esp_now_send(slaveMac, (uint8_t *)&encryptedMyData, sizeof(encryptedMyData));
+      if (result != ESP_OK)  addLog("ESP-NOW send failed: " + String(result));
       response = "Command: " + cmd + " | Target: " + attack;
       if (cmd == "start") {
         response = "Attack " + attack + " started!";
@@ -296,7 +299,8 @@ void loop() {
       lastStopSendTime = millis();
       struct_message encryptedStopData = stopData;
       XOR_crypt((uint8_t*)&encryptedStopData, sizeof(encryptedStopData));
-      esp_now_send(slaveMac, (uint8_t *) &encryptedStopData, sizeof(encryptedStopData));
+      esp_err_t result = esp_now_send(slaveMac, (uint8_t *)&encryptedStopData, sizeof(encryptedStopData));
+      if (result != ESP_OK)  addLog("ESP-NOW stop send failed: " + String(result));
       stopSendCount++;
       if (stopSendCount >= 25) { // Try up to 25 times (2 seconds)
         isStopping = false;

