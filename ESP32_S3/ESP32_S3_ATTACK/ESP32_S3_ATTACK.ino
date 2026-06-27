@@ -12,7 +12,12 @@
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <esp_bt.h>
+#if __has_include(<DNSServer.h>)
 #include <DNSServer.h>
+#define HAS_DNS_SERVER 1
+#else
+#define HAS_DNS_SERVER 0
+#endif
 #include <string>
 
 #define CC1101_CS 10
@@ -68,7 +73,9 @@ bool sourAppleInitialized = false;
 unsigned long lastAppleSpamTime = 0;
 
 // DNS Server for Evil Twin
+#if HAS_DNS_SERVER
 DNSServer dnsServer;
+#endif
 bool dnsStarted = false;
 
 // ===== TARGET STRUCTURES =====
@@ -613,15 +620,19 @@ void startEvilTwin() {
     apChannel = selectedWifiTarget.channel;
   }
   WiFi.softAP(apName.c_str(), NULL, apChannel, 0, 4);
+#if HAS_DNS_SERVER
   dnsServer.start(53, "*", WiFi.softAPIP());
   dnsStarted = true;
+#endif
   char buf[80];
   snprintf(buf, sizeof(buf), "[EvilTwin] Created AP '%s' (ch %d) + DNS redirect", apName.c_str(), apChannel);
   sendLogToMaster(buf);
 }
 
 void runEvilTwinStep() {
+#if HAS_DNS_SERVER
   if (dnsStarted) dnsServer.processNextRequest();
+#endif
   static unsigned long lastCheckTime = 0;
   if (millis() - lastCheckTime >= 2000) {
     lastCheckTime = millis();
@@ -655,14 +666,24 @@ void startBLEScan() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  BLEScanResults foundDevices = pBLEScan->start(5, false);
+  int devCount = foundDevices.getCount();
+#else
   BLEScanResults *foundDevices = pBLEScan->start(5, false);
   if (!foundDevices) { sendLogToMaster("[BLE] Scan failed!", true); return; }
+  int devCount = foundDevices->getCount();
+#endif
   char buf[64];
-  snprintf(buf, sizeof(buf), "[BLE] Found %d devices", foundDevices->getCount());
+  snprintf(buf, sizeof(buf), "[BLE] Found %d devices", devCount);
   sendLogToMaster(buf);
-  for (int i = 0; i < min((int)foundDevices->getCount(), 15); i++) {
+  for (int i = 0; i < min(devCount, 15); i++) {
     yield(); esp_task_wdt_reset();
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+    BLEAdvertisedDevice device = foundDevices.getDevice(i);
+#else
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
+#endif
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
     // Device type detection
@@ -770,8 +791,13 @@ void startGhzScan() {
   pBLEScan->setActiveScan(false);
   pBLEScan->setInterval(80);
   pBLEScan->setWindow(50);
-  BLEScanResults *foundDevices = pBLEScan->start(2, false);
-  int bleCount = foundDevices ? foundDevices->getCount() : 0;
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  BLEScanResults foundDevices2 = pBLEScan->start(2, false);
+  int bleCount = foundDevices2.getCount();
+#else
+  BLEScanResults *foundDevices2 = pBLEScan->start(2, false);
+  int bleCount = foundDevices2 ? foundDevices2->getCount() : 0;
+#endif
   pBLEScan->clearResults();
   sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
   char buf[128];
@@ -1220,7 +1246,11 @@ void stopAttack() {
   multiAttackCount = 0;
   multiAttackIndex = 0;
   stopSubGhzJammer();
+#if HAS_DNS_SERVER
   if (dnsStarted) { dnsServer.stop(); dnsStarted = false; }
+#else
+  dnsStarted = false;
+#endif
   logQueueHead = 0; logQueueTail = 0; logQueueCount = 0; logFlushPending = false;
   WiFi.softAPdisconnect(true);
   if (BLEDevice::getAdvertising()) BLEDevice::getAdvertising()->stop();
@@ -1494,8 +1524,12 @@ void setup() {
   // Max TX power
   esp_wifi_set_max_tx_power(84); // +21 dBm
 
-  // Set low data rate for range
+  // Set low data rate for range (max distance)
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_1M_L);
+#else
+  // esp_wifi_internal_set_fix_rate not available in older cores, skip
+#endif
 
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
@@ -1503,9 +1537,15 @@ void setup() {
 
   // Initialize BLE with max power
   BLEDevice::init("ESP32-S3");
+#ifdef ESP_PWR_LVL_P21
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P21);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P21);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P21);
+#else
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P9);
+#endif
 
   // SPI for CC1101
   SPI.begin(12, 13, 11, 10);
