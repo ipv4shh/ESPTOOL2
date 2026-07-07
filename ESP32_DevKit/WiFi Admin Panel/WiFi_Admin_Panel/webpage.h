@@ -252,6 +252,14 @@ const String webpage = R"rawliteral(
   };
   const reportingAttacks=['wifi_scan','ble_scan','evil_twin','subghz_scan','ir_scan','ghz_scan'];
 
+  // SSIDs/BLE names come straight off the air and may contain <, >, & or quotes.
+  // Injected raw into innerHTML they break the table markup, which is why some
+  // names appeared blank or garbled. Escape everything before rendering.
+  function escHtml(s){
+    if(s===undefined||s===null)return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
   document.querySelectorAll('.tab').forEach(tab=>{
     tab.addEventListener('click',function(){
       document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -320,7 +328,7 @@ const String webpage = R"rawliteral(
       .then(function(resp){
         currentTarget=data;
         updateTargetDisplay();
-        document.getElementById('status').innerHTML='TARGET SELECTED: '+(data.ssid||data.name||data.freq||data.proto);
+        document.getElementById('status').innerHTML='TARGET SELECTED: '+escHtml(data.ssid||data.name||data.freq||data.proto);
       });
   }
 
@@ -337,11 +345,11 @@ const String webpage = R"rawliteral(
     var text=document.getElementById('target-text');
     if(currentTarget){
       bar.style.display='flex';
-      var label=currentTarget.type.toUpperCase()+': ';
-      if(currentTarget.type==='wifi') label+=currentTarget.ssid+' (BSSID: '+currentTarget.bssid+')';
-      else if(currentTarget.type==='ble') label+=currentTarget.name+' ('+currentTarget.addr+')';
-      else if(currentTarget.type==='subghz') label+=currentTarget.freq;
-      else if(currentTarget.type==='ir') label+=currentTarget.proto+' '+currentTarget.cmd;
+      var label=escHtml(currentTarget.type.toUpperCase())+': ';
+      if(currentTarget.type==='wifi') label+=escHtml(currentTarget.ssid)+' (BSSID: '+escHtml(currentTarget.bssid)+')';
+      else if(currentTarget.type==='ble') label+=escHtml(currentTarget.name)+' ('+escHtml(currentTarget.addr)+')';
+      else if(currentTarget.type==='subghz') label+=escHtml(currentTarget.freq);
+      else if(currentTarget.type==='ir') label+=escHtml(currentTarget.proto)+' '+escHtml(currentTarget.cmd);
       text.innerHTML=label;
     }else{bar.style.display='none';}
   }
@@ -360,13 +368,13 @@ const String webpage = R"rawliteral(
     if(wp&&wp.classList.contains('active')){
       if(wifiNetworks.length===0){wp.innerHTML='<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">Run Wi-Fi Scan to populate targets</div>';}
       else{var h='<table class="scan-table"><thead><tr><th>SSID</th><th>CH</th><th>BSSID</th><th>RSSI</th><th>SEC</th><th></th></tr></thead><tbody>';
-        for(var i=0;i<wifiNetworks.length;i++){var n=wifiNetworks[i];h+='<tr><td style="font-weight:600;color:#fff;">'+n.ssid+'</td><td style="color:#34d399;">'+n.channel+'</td><td style="color:var(--text-muted);">'+n.bssid+'</td><td>'+n.rssi+' dBm</td><td>'+n.enc+'</td><td><button class="btn-select" onclick="selectWifiTarget('+i+')">SELECT</button></td></tr>';}
+        for(var i=0;i<wifiNetworks.length;i++){var n=wifiNetworks[i];h+='<tr><td style="font-weight:600;color:#fff;">'+escHtml(n.ssid)+'</td><td style="color:#34d399;">'+n.channel+'</td><td style="color:var(--text-muted);">'+escHtml(n.bssid)+'</td><td>'+n.rssi+' dBm</td><td>'+escHtml(n.enc)+'</td><td><button class="btn-select" onclick="selectWifiTarget('+i+')">SELECT</button></td></tr>';}
         h+='</tbody></table>';wp.innerHTML=h;}}
     var bp=document.getElementById('target-ble');
     if(bp&&bp.classList.contains('active')){
       if(bleDevices.length===0){bp.innerHTML='<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">Run BLE Scan to populate targets</div>';}
       else{var h='<table class="scan-table"><thead><tr><th>NAME</th><th>MAC</th><th>RSSI</th><th>TYPE</th><th></th></tr></thead><tbody>';
-        for(var i=0;i<bleDevices.length;i++){var d=bleDevices[i];h+='<tr><td style="font-weight:600;color:#fff;">'+d.name+'</td><td style="color:var(--text-muted);">'+d.addr+'</td><td>'+d.rssi+' dBm</td><td style="color:var(--primary-color);">'+d.type+'</td><td><button class="btn-select" onclick="selectBleTarget('+i+')">SELECT</button></td></tr>';}
+        for(var i=0;i<bleDevices.length;i++){var d=bleDevices[i];h+='<tr><td style="font-weight:600;color:#fff;">'+escHtml(d.name)+'</td><td style="color:var(--text-muted);">'+escHtml(d.addr)+'</td><td>'+d.rssi+' dBm</td><td style="color:var(--primary-color);">'+escHtml(d.type)+'</td><td><button class="btn-select" onclick="selectBleTarget('+i+')">SELECT</button></td></tr>';}
         h+='</tbody></table>';bp.innerHTML=h;}}
     var sp=document.getElementById('target-subghz');
     if(sp&&sp.classList.contains('active')){
@@ -440,7 +448,7 @@ const String webpage = R"rawliteral(
         wifiNetworks.forEach(function(net){
           var wpsColor=net.wps==='WPS_ENABLED'?'#10b981':'var(--text-muted)';
           var wpsLabel=net.wps==='WPS_ENABLED'?'YES':'NO';
-          html+='<tr><td style="font-weight:600;color:#fff;">'+net.ssid+'</td><td style="color:#34d399;">'+net.channel+'</td><td style="color:var(--text-muted);">'+net.bssid+'</td><td>'+net.rssi+' dBm</td><td><span style="color:'+(net.enc==='OPEN'?'var(--primary-color)':'var(--text-muted)')+';">'+net.enc+'</span></td><td style="color:'+wpsColor+';font-weight:bold;">'+wpsLabel+'</td><td style="text-align:center;font-weight:bold;color:#fca5a5;">'+net.clients+'</td></tr>';
+          html+='<tr><td style="font-weight:600;color:#fff;">'+escHtml(net.ssid)+'</td><td style="color:#34d399;">'+net.channel+'</td><td style="color:var(--text-muted);">'+escHtml(net.bssid)+'</td><td>'+net.rssi+' dBm</td><td><span style="color:'+(net.enc==='OPEN'?'var(--primary-color)':'var(--text-muted)')+';">'+escHtml(net.enc)+'</span></td><td style="color:'+wpsColor+';font-weight:bold;">'+wpsLabel+'</td><td style="text-align:center;font-weight:bold;color:#fca5a5;">'+net.clients+'</td></tr>';
         });html+='</tbody></table>';dashBox.innerHTML=html;}}
     else if(selectedAttack==='ble_scan'){
       dashTitle.innerHTML='BLE DEVICES DETECTED';
@@ -452,7 +460,7 @@ const String webpage = R"rawliteral(
       var filtered=bleDevices.filter(function(dev){return dev.name.toLowerCase().indexOf(filter)>=0;});
       if(filtered.length===0){tableBox.innerHTML='<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:12px;">NO MATCHING DEVICES</div>';}
       else{var html='<table class="scan-table"><thead><tr><th>DEVICE</th><th>TYPE</th><th>MAC</th><th>RSSI</th><th>LEVEL</th></tr></thead><tbody>';
-        filtered.forEach(function(dev){html+='<tr><td style="font-weight:600;color:#fff;">'+dev.name+'</td><td style="color:var(--primary-color);font-weight:bold;font-size:10px;">'+dev.type.toUpperCase()+'</td><td style="color:var(--text-muted);">'+dev.addr+'</td><td>'+dev.rssi+' dBm ('+dev.percent+'%)</td><td style="color:#34d399;">['+dev.bar+']</td></tr>';});
+        filtered.forEach(function(dev){html+='<tr><td style="font-weight:600;color:#fff;">'+escHtml(dev.name)+'</td><td style="color:var(--primary-color);font-weight:bold;font-size:10px;">'+escHtml(dev.type).toUpperCase()+'</td><td style="color:var(--text-muted);">'+escHtml(dev.addr)+'</td><td>'+dev.rssi+' dBm ('+escHtml(dev.percent)+'%)</td><td style="color:#34d399;">['+escHtml(dev.bar)+']</td></tr>';});
         html+='</tbody></table>';tableBox.innerHTML=html;}}
     else if(selectedAttack==='evil_twin'){
       dashTitle.innerHTML='EVIL TWIN CONNECTED CLIENTS';
@@ -546,7 +554,10 @@ const String webpage = R"rawliteral(
   }
 
   setTimeout(checkConnection,1000);
-  setInterval(updateConsole,1500);
+  let ws=null,wsConnected=false;
+  function connectWS(){try{ws=new WebSocket('ws://'+location.host+'/ws');ws.onopen=function(){wsConnected=true;};ws.onmessage=function(e){try{var d=JSON.parse(e.data);if(d.type==='log'){parseLogs(d.message);var fl=d.message.split('\n').filter(function(l){return l.indexOf('[WIFI_DEV]')<0&&l.indexOf('[BLE_DEV]')<0&&l.indexOf('[EVIL_CLIENT]')<0&&l.indexOf('[SUBGHZ_DEV]')<0&&l.indexOf('[IR_DEV]')<0&&l.indexOf('[NRF_DEV]')<0;}).join('\n');var cb=document.getElementById('console-box');if(fl.trim()==='')cb.innerHTML='Logs are empty. Standby...';else{cb.innerHTML=fl;cb.scrollTop=cb.scrollHeight;}}}catch(ex){}};ws.onclose=function(){wsConnected=false;setTimeout(connectWS,3000);};ws.onerror=function(){wsConnected=false;ws.close();};}catch(ex){wsConnected=false;}}
+  connectWS();
+  setInterval(function(){if(!wsConnected)updateConsole();},1500);
 </script>
 </body>
 </html>

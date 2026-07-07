@@ -7,18 +7,45 @@
 #if __has_include(<esp_arduino_version.h>)
 #include <esp_arduino_version.h>
 #endif
+#include <mbedtls/aes.h>
 
-// ===== XOR CRYPT HELPER =====
-void XOR_crypt(uint8_t* data, size_t len) {
-  const uint8_t key[] = { 0xDE, 0xAD, 0xBE, 0xEF };
-  for (size_t i = 0; i < len; i++) {
-    data[i] ^= key[i % 4];
-  }
+// Forward declaration for Arduino IDE auto-prototype generation
+typedef struct struct_message struct_message;
+
+// ===== AES-128 ENCRYPTION (replaces XOR) =====
+static const uint8_t AES_KEY[16] = {
+  0x4D, 0x6F, 0x62, 0x69, 0x6C, 0x65, 0x54, 0x6F,
+  0x6F, 0x6C, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65
+};
+
+void encrypt_aes_blocks(uint8_t* data, size_t len) {
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, AES_KEY, 128);
+  for (size_t i = 0; i + 16 <= len; i += 16)
+    mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, data + i, data + i);
+  mbedtls_aes_free(&aes);
 }
+
+void decrypt_aes_blocks(uint8_t* data, size_t len) {
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_dec(&aes, AES_KEY, 128);
+  for (size_t i = 0; i + 16 <= len; i += 16)
+    mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, data + i, data + i);
+  mbedtls_aes_free(&aes);
+}
+
+// ===== CONSTANTS =====
+#define WDT_TIMEOUT_SECONDS 30
+#define STOP_INTERVAL_MS 80
+#define MAX_STOP_ATTEMPTS 25
 
 // ===== SETTINGS =====
 const char* ap_ssid = "ESP-Admin";
 const char* ap_password = "Esp_div_admin";
+const char* adminUser = "admin";
+const char* adminPass = "Esp_div_admin";
 WebServer server(80);
 
 // SLAVE MAC Address
@@ -32,12 +59,16 @@ bool isStopping = false;
 unsigned long lastStopSendTime = 0;
 int stopSendCount = 0;
 
+// Periodic heartbeat ping to the Slave (keeps online status & temperature fresh)
+unsigned long lastPingSendTime = 0;
+#define PING_INTERVAL 2000
+
 // Circular Log Buffer
 #define MAX_LOG_MESSAGES 200
 String logBuffer[MAX_LOG_MESSAGES];
 int logHead = 0;
 int logCount = 0;
-portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
+SemaphoreHandle_t logMutex = NULL;
 
 // ===== ESP-NOW STRUCTURE =====
 typedef struct struct_message {
@@ -50,32 +81,36 @@ struct_message stopData = {0};
 esp_now_peer_info_t peerInfo;
 
 void addLog(const String& logMsg) {
-  portENTER_CRITICAL(&logMux);
-  String timeStr = "[" + String(millis() / 1000) + "s] ";
-  logBuffer[logHead] = timeStr + logMsg;
-  logHead = (logHead + 1) % MAX_LOG_MESSAGES;
-  if (logCount < MAX_LOG_MESSAGES) logCount++;
-  portEXIT_CRITICAL(&logMux);
+  if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    char timeBuf[20];
+    snprintf(timeBuf, sizeof(timeBuf), "[%lus] ", millis() / 1000);
+    logBuffer[logHead] = String(timeBuf) + logMsg;
+    logHead = (logHead + 1) % MAX_LOG_MESSAGES;
+    if (logCount < MAX_LOG_MESSAGES) logCount++;
+    xSemaphoreGive(logMutex);
+  }
 }
 
 String getLogs() {
-  portENTER_CRITICAL(&logMux);
   String allLogs = "";
-  int startIndex = (logCount == MAX_LOG_MESSAGES) ? logHead : 0;
-  for (int i = 0; i < logCount; i++) {
-    int index = (startIndex + i) % MAX_LOG_MESSAGES;
-    allLogs += logBuffer[index] + "\n";
+  if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    int startIndex = (logCount == MAX_LOG_MESSAGES) ? logHead : 0;
+    for (int i = 0; i < logCount; i++) {
+      int index = (startIndex + i) % MAX_LOG_MESSAGES;
+      allLogs += logBuffer[index] + "\n";
+    }
+    xSemaphoreGive(logMutex);
   }
-  portEXIT_CRITICAL(&logMux);
   return allLogs;
 }
 
 void clearLogs() {
-  portENTER_CRITICAL(&logMux);
-  logHead = 0;
-  logCount = 0;
-  for (int i = 0; i < MAX_LOG_MESSAGES; i++) logBuffer[i] = "";
-  portEXIT_CRITICAL(&logMux);
+  if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    logHead = 0;
+    logCount = 0;
+    for (int i = 0; i < MAX_LOG_MESSAGES; i++) logBuffer[i] = "";
+    xSemaphoreGive(logMutex);
+  }
 }
 
 float getBoardTemp() {
@@ -100,6 +135,11 @@ String jsonExtract(const String& json, const String& key) {
   if (json[idx] == '"') {
     int end = json.indexOf('"', idx + 1);
     if (end < 0) return "";
+    // Skip escaped quotes (\") so values containing them aren't truncated
+    while (end > 0 && json[end - 1] == '\\') {
+      end = json.indexOf('"', end + 1);
+      if (end < 0) return "";
+    }
     return json.substring(idx + 1, end);
   }
   int end = idx;
@@ -109,9 +149,16 @@ String jsonExtract(const String& json, const String& key) {
 
 // ===== HELPER: Send ESP-NOW message =====
 void sendToSlave(struct_message& msg) {
-  struct_message encrypted = msg;
-  XOR_crypt((uint8_t*)&encrypted, sizeof(encrypted));
-  esp_now_send(slaveMac, (uint8_t*)&encrypted, sizeof(encrypted));
+  if (!slavePaired) {
+    addLog("ERROR: Slave not paired, send skipped");
+    return;
+  }
+  struct_message encrypted;
+  memset(&encrypted, 0, sizeof(encrypted));
+  memcpy(&encrypted, &msg, sizeof(msg));
+  encrypt_aes_blocks((uint8_t*)&encrypted, sizeof(encrypted));
+  esp_err_t result = esp_now_send(slaveMac, (uint8_t*)&encrypted, sizeof(encrypted));
+  if (result != ESP_OK) addLog("ESP-NOW send failed: " + String(result));
 }
 
 // ===== ESP-NOW SEND CALLBACK =====
@@ -132,16 +179,20 @@ void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, in
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   const uint8_t *srcMac = mac_addr;
 #endif
-  if (len >= (int)sizeof(myData)) {
+  if (len == (int)sizeof(myData)) {
     struct_message incoming;
     memcpy(&incoming, incomingData, sizeof(incoming));
-    XOR_crypt((uint8_t*)&incoming, sizeof(incoming));
+    decrypt_aes_blocks((uint8_t*)&incoming, sizeof(incoming));
     incoming.command[15] = '\0';
     incoming.attack[31] = '\0';
     incoming.logMsg[sizeof(incoming.logMsg)-1] = '\0';
     
-    // Auto-pairing
+    // Auto-pairing with MAC validation
     if (!slavePaired || memcmp(slaveMac, srcMac, 6) != 0) {
+      // Reject broadcast/multicast MACs
+      if (srcMac[0] == 0xFF && srcMac[1] == 0xFF) return;
+      if (srcMac[0] & 0x01) { addLog("Warning: Multicast MAC rejected"); return; }
+
       Serial.printf("Slave MAC detected: %02X:%02X:%02X:%02X:%02X:%02X\n", 
                     srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
       esp_now_del_peer(slaveMac);
@@ -169,7 +220,9 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     } 
     else if (strcmp(incoming.command, "stopped") == 0) {
       isStopping = false;
-      addLog(incoming.logMsg);
+      stopSendCount = 0;
+      lastStopSendTime = 0;
+      if (incoming.logMsg[0] != '\0') addLog(incoming.logMsg);
       Serial.println("Slave confirmed: Stopped");
     }
     else if (strcmp(incoming.command, "log") == 0) {
@@ -181,11 +234,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 
 void setup() {
   Serial.begin(115200);
+  logMutex = xSemaphoreCreateMutex();
+
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  esp_task_wdt_config_t wdt_config = { .timeout_ms = 30000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
+  esp_task_wdt_config_t wdt_config = { .timeout_ms = WDT_TIMEOUT_SECONDS * 1000, .idle_core_mask = (1 << 0) | (1 << 1), .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
 #else
-  esp_task_wdt_init(30, true);
+  esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
 #endif
   esp_task_wdt_add(NULL);
   
@@ -220,12 +275,14 @@ void setup() {
   peerInfo.ifidx = WIFI_IF_AP;
   if (esp_now_add_peer(&peerInfo) != ESP_OK) Serial.println("Failed to add peer");
 
-  // ===== WEB ROUTES =====
+  // ===== WEB ROUTES (all protected with HTTP Basic Auth) =====
   server.on("/", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     server.send(200, "text/html", webpage);
   });
 
   server.on("/logs", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.sendHeader("Pragma", "no-cache");
     server.sendHeader("Expires", "-1");
@@ -233,6 +290,7 @@ void setup() {
   });
 
   server.on("/clear_logs", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     clearLogs();
     server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.sendHeader("Pragma", "no-cache");
@@ -241,6 +299,7 @@ void setup() {
   });
 
   server.on("/status", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     String statusStr = "";
     if (lastPongTime > 0 && (millis() - lastPongTime < 5000)) {
       statusStr += "online";
@@ -260,15 +319,28 @@ void setup() {
   });
 
   server.on("/cmd", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     String cmd = server.arg("q");
     String attack = server.arg("attack");
+
+    // Command validation whitelist
+    const char* validCommands[] = {"start", "stop", "ping"};
+    bool validCmd = false;
+    for (const auto& vc : validCommands) {
+      if (cmd == vc) { validCmd = true; break; }
+    }
+    if (!validCmd) {
+      server.send(400, "text/plain", "Invalid command");
+      return;
+    }
+
     strncpy(myData.command, cmd.c_str(), sizeof(myData.command) - 1);
     myData.command[sizeof(myData.command) - 1] = '\0';
     strncpy(myData.attack, attack.c_str(), sizeof(myData.attack) - 1);
     myData.attack[sizeof(myData.attack) - 1] = '\0';
     memset(myData.logMsg, 0, sizeof(myData.logMsg));
     
-    String response = "";
+    char response[256];
     
     if (cmd == "stop") {
       isStopping = true;
@@ -279,28 +351,31 @@ void setup() {
       strncpy(stopData.attack, attack.c_str(), sizeof(stopData.attack) - 1);
       stopData.attack[sizeof(stopData.attack) - 1] = '\0';
       memset(stopData.logMsg, 0, sizeof(stopData.logMsg));
-      response = "Attack " + attack + " stopping...";
+      snprintf(response, sizeof(response), "Attack %s stopping...", attack.c_str());
       addLog("STOP command triggered");
     } else {
       sendToSlave(myData);
-      response = "Command: " + cmd + " | Target: " + attack;
       if (cmd == "start") {
-        response = "Attack " + attack + " started!";
+        snprintf(response, sizeof(response), "Attack %s started!", attack.c_str());
         addLog("Attack started: " + attack);
+      } else if (cmd == "ping") {
+        snprintf(response, sizeof(response), "PING sent!");
+      } else {
+        snprintf(response, sizeof(response), "Command: %s | Target: %s", cmd.c_str(), attack.c_str());
       }
-      else if (cmd == "ping") response = "PING sent!";
     }
     
     server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server.sendHeader("Pragma", "no-cache");
     server.sendHeader("Expires", "-1");
-    server.send(200, "text/plain", response);
+    server.send(200, "text/plain", String(response));
   });
 
   // ===== NEW v1.2 ROUTES =====
 
   // POST /select_target — send target info to Slave
   server.on("/select_target", HTTP_POST, []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     if (!server.hasArg("plain")) { server.send(400, "text/plain", "No body"); return; }
     String body = server.arg("plain");
     String type = jsonExtract(body, "type");
@@ -325,6 +400,7 @@ void setup() {
 
   // GET /clear_target — clear target on Slave
   server.on("/clear_target", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     struct_message msg = {0};
     strlcpy(msg.command, "clear_target", sizeof(msg.command));
     sendToSlave(msg);
@@ -334,6 +410,7 @@ void setup() {
 
   // POST /multi_attack — send multi-attack command to Slave
   server.on("/multi_attack", HTTP_POST, []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     if (!server.hasArg("plain")) { server.send(400, "text/plain", "No body"); return; }
     String body = server.arg("plain");
     int arrStart = body.indexOf('[');
@@ -357,6 +434,7 @@ void setup() {
 
   // GET /stop_all — stop all attacks on Slave
   server.on("/stop_all", []() {
+    if (!server.authenticate(adminUser, adminPass)) { return server.requestAuthentication(); }
     isStopping = true;
     stopSendCount = 0;
     lastStopSendTime = 0;
@@ -375,17 +453,29 @@ void setup() {
 void loop() {
   server.handleClient();
   esp_task_wdt_reset();
-  
+
+  // Heartbeat: ping the Slave every 2s so the web UI's online/offline status
+  // and temperature reading stay current even when no attack is running.
+  if (slavePaired && !isStopping && (millis() - lastPingSendTime >= PING_INTERVAL)) {
+    lastPingSendTime = millis();
+    struct_message ping = {0};
+    strlcpy(ping.command, "ping", sizeof(ping.command));
+    sendToSlave(ping);
+  }
+
   if (isStopping) {
-    if (millis() - lastStopSendTime >= 80) {
+    if (millis() - lastStopSendTime >= STOP_INTERVAL_MS) {
       lastStopSendTime = millis();
       esp_task_wdt_reset();
-      struct_message encryptedStopData = stopData;
-      XOR_crypt((uint8_t*)&encryptedStopData, sizeof(encryptedStopData));
+      // Full zeroing before encryption
+      struct_message encryptedStopData;
+      memset(&encryptedStopData, 0, sizeof(encryptedStopData));
+      memcpy(&encryptedStopData, &stopData, sizeof(stopData));
+      encrypt_aes_blocks((uint8_t*)&encryptedStopData, sizeof(encryptedStopData));
       esp_err_t result = esp_now_send(slaveMac, (uint8_t *)&encryptedStopData, sizeof(encryptedStopData));
       if (result != ESP_OK) addLog("ESP-NOW stop send failed: " + String(result));
       stopSendCount++;
-      if (stopSendCount >= 25) {
+      if (stopSendCount >= MAX_STOP_ATTEMPTS) {
         isStopping = false;
         addLog("Stop timeout reached (Slave did not acknowledge)");
         Serial.println("Finished sending stop commands (timeout)");
