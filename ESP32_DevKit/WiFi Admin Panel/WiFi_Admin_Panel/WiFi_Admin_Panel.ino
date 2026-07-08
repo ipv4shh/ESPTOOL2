@@ -94,6 +94,7 @@ void addLog(const String& logMsg) {
 String getLogs() {
   String allLogs = "";
   if (logMutex && xSemaphoreTake(logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    allLogs.reserve(logCount * 96);  // pre-allocate to avoid repeated realloc/fragmentation
     int startIndex = (logCount == MAX_LOG_MESSAGES) ? logHead : 0;
     for (int i = 0; i < logCount; i++) {
       int index = (startIndex + i) % MAX_LOG_MESSAGES;
@@ -206,10 +207,11 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
         slavePaired = true;
         Serial.println("Switched to Unicast with ACK confirmation!");
         Preferences prefs;
-        prefs.begin("esptool2", false);
-        prefs.putBytes("slaveMac", slaveMac, 6);
-        prefs.putBool("slavePaired", true);
-        prefs.end();
+        if (prefs.begin("esptool2", false)) {  // skip persistence if NVS can't be opened
+          prefs.putBytes("slaveMac", slaveMac, 6);
+          prefs.putBool("slavePaired", true);
+          prefs.end();
+        }
       }
     }
 
@@ -259,14 +261,15 @@ void setup() {
   
   // Load paired Slave MAC
   Preferences prefs;
-  prefs.begin("esptool2", false);
-  if (prefs.getBool("slavePaired", false)) {
-    prefs.getBytes("slaveMac", slaveMac, 6);
-    slavePaired = true;
-    Serial.printf("Loaded Slave MAC from Flash: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                  slaveMac[0], slaveMac[1], slaveMac[2], slaveMac[3], slaveMac[4], slaveMac[5]);
+  if (prefs.begin("esptool2", false)) {
+    if (prefs.getBool("slavePaired", false)) {
+      prefs.getBytes("slaveMac", slaveMac, 6);
+      slavePaired = true;
+      Serial.printf("Loaded Slave MAC from Flash: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    slaveMac[0], slaveMac[1], slaveMac[2], slaveMac[3], slaveMac[4], slaveMac[5]);
+    }
+    prefs.end();
   }
-  prefs.end();
 
   memset(&peerInfo, 0, sizeof(peerInfo));
   memcpy(peerInfo.peer_addr, slaveMac, 6);
