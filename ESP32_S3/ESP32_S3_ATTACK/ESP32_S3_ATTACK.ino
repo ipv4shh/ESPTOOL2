@@ -892,10 +892,12 @@ void startBLEScan() {
 // fixed MAC makes the popup appear only once. Rotating it per-advert keeps
 // the target device showing the pairing popup continuously.
 void rotateBleMac() {
-  esp_bd_addr_t rnd;
+  uint8_t rnd[6];
   for (int i = 0; i < 6; i++) rnd[i] = random(256);
-  rnd[0] |= 0xC0;  // top two bits set => BLE random static address
-  esp_ble_gap_set_rand_addr(rnd);
+  // NimBLE addresses are little-endian (MSB is index 5); set the top two bits
+  // there so the host treats it as a BLE random static address.
+  rnd[5] |= 0xC0;
+  BLEDevice::setOwnAddr(rnd);  // NimBLE: wraps ble_hs_id_set_rnd(); esp_ble_gap_set_rand_addr() is Bluedroid-only and absent in this build
 }
 
 void startBLESpoofer() {
