@@ -1,0 +1,3 @@
+Вход на веб-панель (HTTP Basic Auth):
+  - Логин: admin
+  - Пароль: Esp_div_admin
