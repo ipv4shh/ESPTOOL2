@@ -173,11 +173,7 @@ https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32
 
 ---
 
-## 📜 Лицензия
 
-MIT License. Используйте, модифицируйте, распространяйте — с указанием авторства.
-
----
 
 ## 🔗 Ссылки
 
